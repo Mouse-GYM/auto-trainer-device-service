@@ -1,0 +1,6 @@
+@AutoTrainer.Api_HostAddress = http://localhost:5150
+
+GET {{AutoTrainer.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

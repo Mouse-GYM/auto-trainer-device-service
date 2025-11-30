@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.13.35919.96 d17.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AutoTrainer.Api", "AutoTrainer.Api\AutoTrainer.Api.csproj", "{E2A2282B-38A2-41F2-BBC4-2FB472B6F3C9}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E2A2282B-38A2-41F2-BBC4-2FB472B6F3C9}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E2A2282B-38A2-41F2-BBC4-2FB472B6F3C9}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E2A2282B-38A2-41F2-BBC4-2FB472B6F3C9}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E2A2282B-38A2-41F2-BBC4-2FB472B6F3C9}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D7F1F4A7-F2B4-4036-81A3-4A3F3FB113FA}
+	EndGlobalSection
+EndGlobal

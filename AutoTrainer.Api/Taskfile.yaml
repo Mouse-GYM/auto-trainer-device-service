@@ -1,0 +1,36 @@
+# https://taskfile.dev
+
+version: '3'
+
+vars:
+  REPOSITORY: ghcr.io
+  IMAGE:
+    sh: jq -r .name "docker-version.json"
+  REPOIMAGE: "{{.REPOSITORY}}/{{.IMAGE}}"
+  VERSION:
+    sh: jq -r .version "docker-version.json"
+  MAJOR:
+    sh: bash -c 'string={{.VERSION}} && arr=(${string//"."/ }) && echo ${arr[0]}'
+  MINOR:
+    sh: bash -c 'string={{.VERSION}} && arr=(${string//"."/ }) && echo ${arr[1]}'
+  REVISION:
+    sh: bash -c 'string={{.VERSION}} && arr=(${string//"."/ }) && echo ${arr[2]}'
+  IMAGEWITHVERSION: "{{.REPOIMAGE}}:{{.MAJOR}}"
+  IMAGEWITHMINORVERSION: "{{.IMAGEWITHVERSION}}.{{.MINOR}}"
+  IMAGEWITHREVERSION: "{{.IMAGEWITHMINORVERSION}}.{{.REVISION}}"
+  IMAGELATEST: "{{.REPOIMAGE}}:latest"
+
+tasks:
+  build:
+    cmds:
+      - docker build --platform linux/arm64 --tag {{.IMAGEWITHVERSION}} .
+      - docker tag {{.IMAGEWITHVERSION}} {{.IMAGEWITHMINORVERSION}}
+      - docker tag {{.IMAGEWITHMINORVERSION}} {{.IMAGEWITHREVERSION}}
+      - docker tag {{.IMAGEWITHREVERSION}} {{.IMAGELATEST}}
+  release:
+    cmds:
+      - task: build
+      - docker push {{.IMAGEWITHVERSION}}
+      - docker push {{.IMAGEWITHMINORVERSION}}
+      - docker push {{.IMAGEWITHREVERSION}}
+      - docker push {{.IMAGELATEST}}
