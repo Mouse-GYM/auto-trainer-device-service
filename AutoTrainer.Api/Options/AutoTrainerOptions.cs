@@ -4,8 +4,10 @@
     {
         public const string AutoTrainer = "AutoTrainer";
 
-        public QueueOptions? MessageQueue { get; set; }
+        public string DeviceId { get; set; } = "Device";
 
-        public QueueOptions? CommandQueue { get; set; }
+        public MessageQueueOptions? MessageQueue { get; set; }
+
+        public CommandQueueOptions? CommandQueue { get; set; }
     }
 }

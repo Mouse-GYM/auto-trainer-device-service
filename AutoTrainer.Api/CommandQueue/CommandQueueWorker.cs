@@ -1,4 +1,7 @@
-﻿using AutoTrainer.Api.Options;
+﻿using AutoTrainer.Api.ApiTypes;
+using AutoTrainer.Api.Hub;
+using AutoTrainer.Api.Models;
+using AutoTrainer.Api.Options;
 
 namespace AutoTrainer.Api.CommandQueue;
 
@@ -6,90 +9,60 @@ public class CommandQueueWorker : BackgroundService
 {
     private RequestSocket? _requestSocket;
 
-    private readonly HubConnection _hubConnection;
+    private readonly string _socketConnectionUrl;
+
+    private readonly ICommandTaskQueue _taskQueue;
+
+    private readonly IHubContext<MessageHub, IMessageHub> _hubContext;
+
+    private readonly AutotrainerDevice _device;
+
+    private readonly CommandQueueOptions _options;
 
     private readonly ILogger<CommandQueueWorker> _logger;
 
-    private readonly string _socketConnectionUrl;
-
-    private ApiCommandRequest<object>? nextCommand = null;
-
-    private const string _defaultSocketConnectionUrl = "tcp://127.0.0.1:5557";
-
-    private readonly JsonSerializerOptions serializeOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
-
     private const int s_MaxRetries = 10;
 
-    public CommandQueueWorker(ILogger<CommandQueueWorker> logger, IConfiguration configuration)
+    private static readonly JsonSerializerOptions messageSerializationOptions = JsonDefaults.CamelCase;
+
+    public CommandQueueWorker(ICommandTaskQueue queue, IHubContext<MessageHub, IMessageHub> hubContext, AutotrainerDevice device, IOptions<CommandQueueOptions> options, ILogger<CommandQueueWorker> logger)
     {
-        _logger = logger;
+        (_taskQueue, _hubContext, _device, _options, _logger) = (queue, hubContext, device, options.Value, logger);
 
-        _hubConnection = new HubConnectionBuilder().WithUrl("http://localhost:5150/messages").Build();
-        _hubConnection.On<string, string>("SendCommand", PerformConnect);
+        _logger.LogInformation("Command queue connection: {connection}", options.Value.Connection);
 
-        _socketConnectionUrl = configuration.GetSection(AutoTrainerOptions.AutoTrainer)?.GetSection(QueueOptions.CommandQueue)?.GetValue<string>(QueueOptions.ConnectionKey) ?? _defaultSocketConnectionUrl;
+        _socketConnectionUrl = _options.Connection;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await StartHubConnectionAsync(stoppingToken);
-
         ConnectCommandSocket();
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            if (nextCommand != null)
-            {
-                await SendNextCommandRequest(stoppingToken);
-            }
-            else
-            {
-                await Task.Delay(2000, stoppingToken);
-
-                // performConnect();
-            }
-        }
-
-        _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
-
-        await StopHubConnectionAsync(stoppingToken);
-    }
-
-    private void PerformConnect(string user, string message)
-    {
-        _logger.LogInformation("Connect called");
-
-        nextCommand = new ApiCommandRequest<object>(ApiCommandKind.UserDefined, new Dictionary<string, object>()
-     {
-            { "fooBar", 20 },
-            { "barFoo", "hello" },
-            { "data", 3.41},
-        });
-    }
-
-    private async Task StartHubConnectionAsync(CancellationToken cancellationToken)
-    {
-        while (true)
-        {
             try
             {
-                await _hubConnection.StartAsync(cancellationToken);
+                var nextCommand = await _taskQueue.DequeueAsync(stoppingToken);
 
+                await SendCommandRequest(nextCommand, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
                 break;
             }
-            catch
+            catch (Exception ex)
             {
-                await Task.Delay(500, cancellationToken);
+                _logger.LogError(ex, "Error processing command");
             }
         }
+
+        _logger.LogInformation("Worker exiting at: {time}", DateTimeOffset.Now);
     }
 
-    private async Task StopHubConnectionAsync(CancellationToken cancellationToken)
+    public override async Task StopAsync(CancellationToken cancellationToken)
     {
-        await _hubConnection.DisposeAsync();
+        await base.StopAsync(cancellationToken);
+        DisconnectCommandSocket();
     }
 
     private void ConnectCommandSocket()
@@ -101,38 +74,45 @@ public class CommandQueueWorker : BackgroundService
         _requestSocket = s;
     }
 
-    private async Task SendNextCommandRequest(CancellationToken stoppingToken)
+    private void DisconnectCommandSocket()
+    {
+        var socket = Interlocked.Exchange(ref _requestSocket, null);
+
+        if (socket is not null)
+        {
+            socket.Options.Linger = TimeSpan.Zero;
+            socket.Close();
+            socket.Dispose();
+        }
+    }
+
+    private async Task SendCommandRequest(ApiCommandRequest request, CancellationToken stoppingToken)
     {
         if (_requestSocket == null)
         {
             return;
         }
 
-        if (nextCommand is ApiCommandRequest<object> request)
+        _logger.LogDebug("sending command request {cmd}", request.Command);
+
+        if (_requestSocket.TrySendFrame(JsonSerializer.Serialize(request, messageSerializationOptions)))
         {
-            _logger.LogDebug("sending command request {cmd}", request.Command);
+            _logger.LogDebug("response to command request {cmd} is pending", request.Command);
 
-            if (_requestSocket.TrySendFrame(JsonSerializer.Serialize(request, serializeOptions)))
+            var response = await ReceiveCommandRequestResponse(stoppingToken);
+
+            if (response is ApiCommandRequestResponse serviceResponse)
             {
-                _logger.LogDebug("response to command request {cmd} is pending", request.Command);
-
-                var response = await ReceiveCommandRequestResponse(stoppingToken);
-
-                if (response != null)
-                {
-                    _logger.LogDebug("response to command request {cmd} received", request.Command);
-
-                    nextCommand = null;
-                }
+                _logger.LogDebug("response to command request {cmd} received with result {result}", request.Command, serviceResponse.Result);
             }
-            else
-            {
-                _logger.LogWarning("failed to send frame {cmd}", request.Command);
-            }
+        }
+        else
+        {
+            _logger.LogWarning("failed to send frame {cmd}", request.Command);
         }
     }
 
-    private async Task<string?> ReceiveCommandRequestResponse(CancellationToken stoppingToken)
+    private async Task<ApiCommandRequestResponse?> ReceiveCommandRequestResponse(CancellationToken stoppingToken)
     {
         if (_requestSocket is RequestSocket socket)
         {
@@ -158,23 +138,19 @@ public class CommandQueueWorker : BackgroundService
             {
                 _logger.LogWarning("did not receive response, redoing socket");
 
-                var s = socket;
-
-                _requestSocket = null;
-
-                s.Close();
-                s.Dispose();
-
+                DisconnectCommandSocket();
                 ConnectCommandSocket();
+
+                await Task.Delay(100, stoppingToken);
             }
 
             if (resp != null)
             {
-                var str = Encoding.UTF8.GetString(resp);
+                var response = JsonSerializer.Deserialize<ApiCommandRequestResponse>(resp, messageSerializationOptions);
 
-                _logger.LogInformation("{resp}", str);
+                _device.OnCommandResponse(response);
 
-                return str;
+                return response;
             }
         }
 

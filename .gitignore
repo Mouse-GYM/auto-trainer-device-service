@@ -318,3 +318,4 @@ Deployment/*/AppComponents.wxs
 Deployment/*/AnalysisComponents.wxs
 
 local.settings.json
+appsettings.*.json

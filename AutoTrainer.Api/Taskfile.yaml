@@ -6,7 +6,8 @@ vars:
   REPOSITORY: ghcr.io
   IMAGE:
     sh: jq -r .name "docker-version.json"
-  REPOIMAGE: "{{.REPOSITORY}}/{{.IMAGE}}"
+  REPO_IMAGE: "{{.REPOSITORY}}/{{.IMAGE}}"
+  PLATFORMS: linux/amd64,linux/arm64/v8
   VERSION:
     sh: jq -r .version "docker-version.json"
   MAJOR:
@@ -15,22 +16,24 @@ vars:
     sh: bash -c 'string={{.VERSION}} && arr=(${string//"."/ }) && echo ${arr[1]}'
   REVISION:
     sh: bash -c 'string={{.VERSION}} && arr=(${string//"."/ }) && echo ${arr[2]}'
-  IMAGEWITHVERSION: "{{.REPOIMAGE}}:{{.MAJOR}}"
-  IMAGEWITHMINORVERSION: "{{.IMAGEWITHVERSION}}.{{.MINOR}}"
-  IMAGEWITHREVERSION: "{{.IMAGEWITHMINORVERSION}}.{{.REVISION}}"
-  IMAGELATEST: "{{.REPOIMAGE}}:latest"
+  IMAGE_WITH_VERSION: "{{.REPO_IMAGE}}:{{.MAJOR}}"
+  IMAGE_WITH_MINOR_VERSION: "{{.IMAGE_WITH_VERSION}}.{{.MINOR}}"
+  IMAGE_WITH_REVISION: "{{.IMAGE_WITH_MINOR_VERSION}}.{{.REVISION}}"
+  IMAGE_LATEST: "{{.REPO_IMAGE}}:latest"
 
 tasks:
   build:
     cmds:
-      - docker build --platform linux/arm64 --tag {{.IMAGEWITHVERSION}} .
-      - docker tag {{.IMAGEWITHVERSION}} {{.IMAGEWITHMINORVERSION}}
-      - docker tag {{.IMAGEWITHMINORVERSION}} {{.IMAGEWITHREVERSION}}
-      - docker tag {{.IMAGEWITHREVERSION}} {{.IMAGELATEST}}
+      - docker build --tag {{.IMAGE_WITH_VERSION}} .
+      - docker tag {{.IMAGE_WITH_VERSION}} {{.IMAGE_WITH_MINOR_VERSION}}
+      - docker tag {{.IMAGE_WITH_MINOR_VERSION}} {{.IMAGE_WITH_REVISION}}
+      - docker tag {{.IMAGE_WITH_REVISION}} {{.IMAGE_LATEST}}
   release:
     cmds:
-      - task: build
-      - docker push {{.IMAGEWITHVERSION}}
-      - docker push {{.IMAGEWITHMINORVERSION}}
-      - docker push {{.IMAGEWITHREVERSION}}
-      - docker push {{.IMAGELATEST}}
+      - >-
+        docker buildx build --platform {{.PLATFORMS}}
+        --tag {{.IMAGE_WITH_VERSION}}
+        --tag {{.IMAGE_WITH_MINOR_VERSION}}
+        --tag {{.IMAGE_WITH_REVISION}}
+        --tag {{.IMAGE_LATEST}}
+        --push .

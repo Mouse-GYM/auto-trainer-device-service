@@ -1,9 +1,9 @@
-﻿using Amazon;
-using Amazon.Runtime;
-using Amazon.SimpleNotificationService;
-using Amazon.SimpleNotificationService.Model;
+﻿using AutoTrainer.Api.ApiTypes;
+using AutoTrainer.Api.CommandQueue;
+using AutoTrainer.Api.Emergency;
+using AutoTrainer.Api.Hub;
+using AutoTrainer.Api.Models;
 using AutoTrainer.Api.Options;
-using Microsoft.Extensions.Logging;
 
 namespace AutoTrainer.Api.MessageQueue;
 
@@ -11,19 +11,26 @@ public class MessageSubscriptionWorker : BackgroundService
 {
     private readonly string _connection;
 
-    private readonly ILogger<MessageSubscriptionWorker> _logger;
-
     private readonly IHubContext<MessageHub, IMessageHub> _hubContext;
 
-    private const string _defaultConnection = "tcp://127.0.0.1:5556";
+    private readonly AutotrainerDevice _device;
 
-    public MessageSubscriptionWorker(ILogger<MessageSubscriptionWorker> logger, IHubContext<MessageHub, IMessageHub> hubContext, IConfiguration configuration)
+    private readonly ICommandTaskQueue _commandQueue;
+
+    private readonly IEmergencyQueue _emergencyQueue;
+
+    private readonly ILogger<MessageSubscriptionWorker> _logger;
+
+    private static readonly JsonSerializerOptions messageSerializerOptions = JsonDefaults.CamelCase;
+
+    public MessageSubscriptionWorker(IHubContext<MessageHub, IMessageHub> hubContext, AutotrainerDevice device, ICommandTaskQueue commandQueue, IEmergencyQueue emergencyQueue, IOptions<MessageQueueOptions> options, ILogger<MessageSubscriptionWorker> logger)
     {
-        _logger = logger;
+        (_hubContext, _device, _commandQueue, _emergencyQueue, _logger) = (hubContext, device, commandQueue, emergencyQueue, logger);
 
-        _hubContext = hubContext;
 
-        _connection = configuration.GetSection(AutoTrainerOptions.AutoTrainer)?.GetSection(QueueOptions.MessageQueue)?.GetValue<string>(QueueOptions.ConnectionKey) ?? _defaultConnection;
+        _logger.LogInformation("Message queue connection: {connection}", options.Value.Connection);
+
+        _connection = options.Value.Connection;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -40,8 +47,6 @@ public class MessageSubscriptionWorker : BackgroundService
         }, stoppingToken);
 
         _logger.LogInformation("Worker ending at: {time}", DateTimeOffset.Now);
-
-        await Task.Delay(1000, stoppingToken);
     }
 
     private async Task SubscribeAsync(CancellationToken stoppingToken)
@@ -56,53 +61,70 @@ public class MessageSubscriptionWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var message = await subscriber.ReceiveMultipartMessageAsync(cancellationToken: stoppingToken);
-
-            if (message != null && message.FrameCount == 2)
+            try
             {
-                var topic = BitConverter.ToUInt32(message[0].AsSpan());
+                var message = await subscriber.ReceiveMultipartMessageAsync(cancellationToken: stoppingToken);
 
-                var data = message[1].ConvertToString();
-
-                var jsonObj = JsonSerializer.Deserialize<object>(data, new JsonSerializerOptions
+                if (message != null && message.FrameCount == 2)
                 {
-                    PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-                });
+                    var topic = (ApiTopic)BitConverter.ToUInt32(message[0].AsSpan());
 
-                _logger.LogInformation("From Publisher| {topic}: {msg}", topic, jsonObj);
+                    var data = message[1].ToByteArray();
 
-                await _hubContext.Clients.All.ReceiveMessage($"{topic}", jsonObj);
+                    switch (topic)
+                    {
+                        case ApiTopic.Heartbeat:
+                            {
+                                var heartbeat = JsonSerializer.Deserialize<ApiHeartBeat>(data, messageSerializerOptions);
 
-                if ((ApiTopic)topic == ApiTopic.Emergency)
-                {
-                    _logger.LogInformation("Emergency topic");
-                    // using var snsClient = new AmazonSimpleNotificationServiceClient(
-                    //    new BasicAWSCredentials("", ""), RegionEndpoint.USEast2);
-                    // await PublishToTopicAsync(snsClient, topicArn, data);
+                                if (heartbeat != null)
+                                {
+                                    _device.OnHeartbeat(heartbeat);
+                                }
+                            }
+                            break;
+                        case ApiTopic.Emergency:
+                            {
+                                var apiEvent = JsonSerializer.Deserialize<ApiEvent>(data, messageSerializerOptions);
+                                if (apiEvent != null)
+                                {
+                                    _logger.LogInformation("From Publisher| {topic}: {kind}", topic, apiEvent.Kind);
+                                    await _emergencyQueue.EnqueueAsync(apiEvent);
+                                }
+                                else
+                                {
+                                    _logger.LogWarning("Failed to deserialize emergency event");
+                                }
+                            }
+                            break;
+                        case ApiTopic.Event:
+                            {
+                                var apiEvent = JsonSerializer.Deserialize<ApiEvent>(data, messageSerializerOptions);
+
+                                if (apiEvent != null)
+                                {
+                                    _device.OnApiEvent(apiEvent);
+                                }
+                            }
+                            break;
+                        case ApiTopic.CommandResult:
+                            {
+                                var response = JsonSerializer.Deserialize<ApiCommandRequestResponse>(data, messageSerializerOptions);
+
+                                _device.OnCommandResponse(response);
+                            }
+                            break;
+                        default:
+                            _logger.LogWarning("Unhandled topic {topic}", topic);
+                            break;
+                    }
+
                 }
             }
-        }
-    }
-
-    string topicArn = "arn:aws:sns:us-east-2:178022192522:mouse-gym-standard-notifications";
-
-    private async Task PublishToTopicAsync(IAmazonSimpleNotificationService client, string topicArn, string messageText)
-    {
-        try
-        {
-            var request = new PublishRequest
+            catch (Exception ex)
             {
-                TopicArn = topicArn,
-                Message = messageText,
-            };
-
-            var response = await client.PublishAsync(request);
-
-            _logger.LogInformation("Successfully published message ID: {id}", response.MessageId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex.Message);
+                _logger.LogError("{message}", ex.Message);
+            }
         }
     }
 }
