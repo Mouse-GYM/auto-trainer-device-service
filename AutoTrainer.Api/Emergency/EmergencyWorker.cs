@@ -5,7 +5,7 @@ using AutoTrainer.Api.Options;
 
 namespace AutoTrainer.Api.Emergency;
 
-public class EmergencyWorker : BackgroundService
+public partial class EmergencyWorker : BackgroundService
 {
     private readonly IEmergencyQueue _queue;
 
@@ -46,18 +46,18 @@ public class EmergencyWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing emergency event");
+                LogEmergencyError(ex);
             }
         }
 
-        _logger.LogInformation("EmergencyWorker exiting at: {time}", DateTimeOffset.Now);
+        LogExiting(DateTimeOffset.Now);
     }
 
     private async Task HandleEmergencyAsync(ApiEvent apiEvent)
     {
         if (!_options.SnS.IsConfigured)
         {
-            _logger.LogWarning("AWS credentials are not set. Skipping SNS publish.");
+            LogCredentialsNotSet();
             return;
         }
 
@@ -67,9 +67,11 @@ public class EmergencyWorker : BackgroundService
 
         var ts = DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(apiEvent.When * 1000));
 
-        var subject = $"{_options.SnS.DeviceId} Emergency {(apiEvent.Kind == ApiEventKind.EmergencyStop ? "Stop" : "Resume")} (cause: {reason ?? "unspecified"})";
+        var deviceId = _device.Configuration.DeviceId;
 
-        var alertMessage = $"Device {_options.SnS.DeviceId} Emergency {(apiEvent.Kind == ApiEventKind.EmergencyStop ? "Stop" : "Resume")} at {ts} due to: {reason ?? "unspecified"}\n\n\n";
+        var subject = $"{deviceId} Emergency {(apiEvent.Kind == ApiEventKind.EmergencyStop ? "Stop" : "Resume")} (cause: {reason ?? "unspecified"})";
+
+        var alertMessage = $"Device {deviceId} Emergency {(apiEvent.Kind == ApiEventKind.EmergencyStop ? "Stop" : "Resume")} at {ts} due to: {reason ?? "unspecified"}\n\n\n";
 
         var alarms = _device.GetActiveAlarms();
 
@@ -122,11 +124,26 @@ public class EmergencyWorker : BackgroundService
 
             var response = await client.PublishAsync(request);
 
-            _logger.LogInformation("Successfully published message ID: {id}", response.MessageId);
+            LogPublished(response.MessageId);
         }
         catch (Exception ex)
         {
-            _logger.LogError("{message}", ex.Message);
+            LogPublishError(ex.Message);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Error processing emergency event")]
+    private partial void LogEmergencyError(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "EmergencyWorker exiting at: {time}")]
+    private partial void LogExiting(DateTimeOffset time);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "AWS credentials are not set. Skipping SNS publish.")]
+    private partial void LogCredentialsNotSet();
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Successfully published message ID: {id}")]
+    private partial void LogPublished(string id);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "{message}")]
+    private partial void LogPublishError(string message);
 }

@@ -2,8 +2,6 @@
 
 public class SnSOptions
 {
-    public string DeviceId { get; set; } = "";
-
     public string TopicArn { get; set; } = "";
 
     public string AccessKeyId { get; set; } = "";

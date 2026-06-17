@@ -319,3 +319,11 @@ Deployment/*/AnalysisComponents.wxs
 
 local.settings.json
 appsettings.*.json
+
+# Runtime SQLite databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*-design.db
+/AutoTrainer.Api/device/
+/AutoTrainer.Api/animals/

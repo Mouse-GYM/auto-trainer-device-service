@@ -11,6 +11,14 @@ public class ApiSystemStatus
     public ApiPelletStatus PelletDevice { get; set; }
     public ApiTunnelStatus TunnelDevice { get; set; }
     public ApiBehaviorStatus Behavior { get; set; }
+
+    public override string ToString()
+    {
+        var animal = Animal is { } a ? $", Animal={a.Name}" : "";
+        var project = !string.IsNullOrEmpty(Project.DayPath) ? $", DayPath={Project.DayPath}" : "";
+
+        return $"ApplicationMode={ApplicationMode}, TrainingMode={TrainingMode}{animal}{project}";
+    }
 }
 
 public readonly record struct ApiProjectStatus

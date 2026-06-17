@@ -5,7 +5,7 @@ using AutoTrainer.Api.Options;
 
 namespace AutoTrainer.Api.CommandQueue;
 
-public class CommandQueueWorker : BackgroundService
+public partial class CommandQueueWorker : BackgroundService
 {
     private RequestSocket? _requestSocket;
 
@@ -29,7 +29,7 @@ public class CommandQueueWorker : BackgroundService
     {
         (_taskQueue, _hubContext, _device, _options, _logger) = (queue, hubContext, device, options.Value, logger);
 
-        _logger.LogInformation("Command queue connection: {connection}", options.Value.Connection);
+        LogQueueConnection(options.Value.Connection);
 
         _socketConnectionUrl = _options.Connection;
     }
@@ -52,11 +52,11 @@ public class CommandQueueWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error processing command");
+                LogCommandError(ex);
             }
         }
 
-        _logger.LogInformation("Worker exiting at: {time}", DateTimeOffset.Now);
+        LogWorkerExiting(DateTimeOffset.Now);
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
@@ -93,22 +93,22 @@ public class CommandQueueWorker : BackgroundService
             return;
         }
 
-        _logger.LogDebug("sending command request {cmd}", request.Command);
+        LogSendingCommand(request.Command);
 
         if (_requestSocket.TrySendFrame(JsonSerializer.Serialize(request, messageSerializationOptions)))
         {
-            _logger.LogDebug("response to command request {cmd} is pending", request.Command);
+            LogCommandPending(request.Command);
 
             var response = await ReceiveCommandRequestResponse(stoppingToken);
 
             if (response is ApiCommandRequestResponse serviceResponse)
             {
-                _logger.LogDebug("response to command request {cmd} received with result {result}", request.Command, serviceResponse.Result);
+                LogCommandResult(request.Command, serviceResponse.Result);
             }
         }
         else
         {
-            _logger.LogWarning("failed to send frame {cmd}", request.Command);
+            LogSendFrameFailed(request.Command);
         }
     }
 
@@ -127,7 +127,7 @@ public class CommandQueueWorker : BackgroundService
                     break;
                 }
 
-                _logger.LogDebug("\tresponse pending, retries {r}", retries);
+                LogResponsePending(retries);
 
                 await Task.Delay(500, stoppingToken);
 
@@ -136,7 +136,7 @@ public class CommandQueueWorker : BackgroundService
 
             if (retries == s_MaxRetries)
             {
-                _logger.LogWarning("did not receive response, redoing socket");
+                LogNoResponse();
 
                 DisconnectCommandSocket();
                 ConnectCommandSocket();
@@ -156,4 +156,31 @@ public class CommandQueueWorker : BackgroundService
 
         return null;
     }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Command queue connection: {connection}")]
+    private partial void LogQueueConnection(string connection);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Error processing command")]
+    private partial void LogCommandError(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Worker exiting at: {time}")]
+    private partial void LogWorkerExiting(DateTimeOffset time);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "sending command request {cmd}")]
+    private partial void LogSendingCommand(ApiCommandKind cmd);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "response to command request {cmd} is pending")]
+    private partial void LogCommandPending(ApiCommandKind cmd);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "response to command request {cmd} received with result {result}")]
+    private partial void LogCommandResult(ApiCommandKind cmd, ApiCommandRequestResult result);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "failed to send frame {cmd}")]
+    private partial void LogSendFrameFailed(ApiCommandKind cmd);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "\tresponse pending, retries {r}")]
+    private partial void LogResponsePending(int r);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "did not receive response, redoing socket")]
+    private partial void LogNoResponse();
 }

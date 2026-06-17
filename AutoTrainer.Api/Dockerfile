@@ -4,6 +4,8 @@
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS base
 RUN mkdir -p /var/log
 RUN chmod uog+rw /var/log
+RUN mkdir -p /data/autotrainer
+RUN chmod uog+rw /data/autotrainer
 WORKDIR /app
 EXPOSE 5150
 

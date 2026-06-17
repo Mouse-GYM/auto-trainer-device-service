@@ -1,10 +1,11 @@
 using AutoTrainer.Api.ApiTypes;
 using AutoTrainer.Api.CommandQueue;
+using AutoTrainer.Api.Data.Stores;
 using AutoTrainer.Api.Hub;
 
 namespace AutoTrainer.Api.Models;
 
-public class AutotrainerDevice
+public partial class AutotrainerDevice
 {
     private const int LatestWebImageThrottleSeconds = 2;
 
@@ -14,15 +15,21 @@ public class AutotrainerDevice
 
     private readonly ILogger<AutotrainerDevice> _logger;
 
+    private readonly IDeviceDataStore _deviceStore;
+
+    private readonly IAnimalDataStore _animalStore;
+
     private readonly Channel<Func<Task>> _updateChannel = Channel.CreateUnbounded<Func<Task>>();
 
     private DateTime _lastWebImageBroadcast = DateTime.MinValue;
 
-    public AutotrainerDevice(ICommandTaskQueue commandQueue, IHubContext<MessageHub, IMessageHub> hubContext, ILogger<AutotrainerDevice> logger)
+    public AutotrainerDevice(ICommandTaskQueue commandQueue, IHubContext<MessageHub, IMessageHub> hubContext, ILogger<AutotrainerDevice> logger, IDeviceDataStore deviceStore, IAnimalDataStore animalStore)
     {
         _commandQueue = commandQueue;
         _hubContext = hubContext;
         _logger = logger;
+        _deviceStore = deviceStore;
+        _animalStore = animalStore;
     }
 
     public ChannelReader<Func<Task>> UpdateReader => _updateChannel.Reader;
@@ -53,6 +60,8 @@ public class AutotrainerDevice
 
     public Behavior Behavior { get; } = new();
 
+    public List<ReachEvent> ReachEvents { get; private set; } = [];
+
     public Animal? Animal { get; private set; }
 
     public string? DeviceDataPath { get; private set; }
@@ -69,7 +78,7 @@ public class AutotrainerDevice
         {
             var when = DateTimeOffset.FromUnixTimeSeconds((long)Math.Round(heartbeat.Timestamp));
 
-            _logger.LogDebug("Heartbeat: {identifier} {when}", heartbeat.Identifier, when);
+            LogHeartbeat(heartbeat.Identifier, when);
 
             var shouldRequestConfig = LastSeen is null || DateTimeOffset.UtcNow - LastSeen > TimeSpan.FromMinutes(1);
 
@@ -77,7 +86,7 @@ public class AutotrainerDevice
 
             if (shouldRequestConfig)
             {
-                _logger.LogInformation("System configuration is missing or out of date.  Requesting update.");
+                LogConfigurationOutOfDate();
 
                 await _commandQueue.EnqueueAsync(new ApiCommandRequest(ApiCommandKind.GetConfiguration));
             }
@@ -92,7 +101,7 @@ public class AutotrainerDevice
         {
             JsonElement? context = apiEvent.Context is JsonElement c ? c : null;
 
-            _logger.LogDebug("Event: {evet}", apiEvent.Kind);
+            LogEvent(apiEvent.Kind);
 
             switch (apiEvent.Kind)
             {
@@ -103,6 +112,15 @@ public class AutotrainerDevice
                         if (ctx != null)
                         {
                             OnAlarmChanged(ctx.Value);
+
+                            try
+                            {
+                                await _deviceStore.AddAlarmHistoryAsync(ctx.Value);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogPersistAlarmHistoryFailed(ex, ctx.Value.AlarmId);
+                            }
                         }
                         break;
                     }
@@ -113,6 +131,15 @@ public class AutotrainerDevice
                         if (ctx != null)
                         {
                             OnDetectorChanged(ctx.Value);
+
+                            try
+                            {
+                                await _deviceStore.AddDetectorHistoryAsync(ctx.Value);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogPersistDetectorHistoryFailed(ex, ctx.Value.DetectorId);
+                            }
                         }
                         break;
                     }
@@ -203,6 +230,59 @@ public class AutotrainerDevice
                         }
                         break;
                     }
+                case ApiEventKind.AnimalSelected:
+                case ApiEventKind.AnimalUpdated:
+                    {
+                        var ctx = context?.Deserialize<ApiAnimalStatus>(s_JsonOptions);
+
+                        if (ctx is { } status)
+                        {
+                            if (string.IsNullOrWhiteSpace(status.Identifier))
+                            {
+                                LogMissingAnimalIdentifier(apiEvent.Kind);
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    await _animalStore.AddAnimalInfoAsync(status);
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogPersistAnimalFailed(ex, status.Identifier);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                case ApiEventKind.TrialReachEvents:
+                    {
+                        var ctx = context?.Deserialize<ApiTrialReachEventsPayload>(s_JsonOptions);
+
+                        if (ctx != null)
+                        {
+                            OnReachEventsChanged(ctx.TrialReachEvents);
+
+                            var identifier = Animal?.Identifier;
+
+                            if (string.IsNullOrWhiteSpace(identifier))
+                            {
+                                LogMissingAnimalIdentifier(apiEvent.Kind);
+                            }
+                            else if (ctx.TrialReachEvents.Count > 0)
+                            {
+                                try
+                                {
+                                    await _animalStore.AddReachEventHistoryAsync(identifier, ctx.TrialReachEvents);
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogPersistReachEventsFailed(ex, identifier);
+                                }
+                            }
+                        }
+                        break;
+                    }
             }
 
             await _hubContext.Clients.All.EventReceived(apiEvent);
@@ -215,7 +295,7 @@ public class AutotrainerDevice
         {
             await _hubContext.Clients.All.CommandResponseReceived(response);
 
-            _logger.LogInformation("Command response {command} {result}", response.Command, response.Result);
+            LogCommandResponse(response.Command, response.Result);
 
             if (response.Result != ApiCommandRequestResult.Success)
             {
@@ -230,6 +310,16 @@ public class AutotrainerDevice
                         if (config != null)
                         {
                             OnSystemConfigurationChanged(config);
+
+                            try
+                            {
+                                await _deviceStore.AddSystemConfigurationAsync(config);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogPersistConfigurationFailed(ex);
+                            }
+
                             await _commandQueue.EnqueueAsync(new ApiCommandRequest(ApiCommandKind.GetStatus));
                         }
                         break;
@@ -252,7 +342,7 @@ public class AutotrainerDevice
         _updateChannel.Writer.TryWrite(async () =>
         {
             DeviceDataPath = path;
-            _logger.LogInformation("Device data path: {path}", path ?? "(none)");
+            LogDeviceDataPath(path ?? "(none)");
             await _hubContext.Clients.All.DeviceDataPath(path);
         });
     }
@@ -262,7 +352,7 @@ public class AutotrainerDevice
         _updateChannel.Writer.TryWrite(async () =>
         {
             TrialPath = path;
-            _logger.LogInformation("Trial path: {path}", path ?? "(none)");
+            LogTrialPath(path ?? "(none)");
             await _hubContext.Clients.All.TrialPath(path);
         });
     }
@@ -272,7 +362,7 @@ public class AutotrainerDevice
         _updateChannel.Writer.TryWrite(async () =>
         {
             WebImagesPath = path;
-            _logger.LogInformation("Web images path: {path}", path ?? "(none)");
+            LogWebImagesPath(path ?? "(none)");
             await _hubContext.Clients.All.WebImagesPath(path);
         });
     }
@@ -289,7 +379,7 @@ public class AutotrainerDevice
                 return;
 
             _lastWebImageBroadcast = now;
-            _logger.LogInformation("Latest web image: {path}", path ?? "(none)");
+            LogLatestWebImage(path ?? "(none)");
 
             await _hubContext.Clients.All.LatestWebImage(path);
         });
@@ -303,12 +393,12 @@ public class AutotrainerDevice
 
         if (existing is null)
         {
-            _logger.LogDebug("Alarm {alarmId} added: active={isActive}, enabled={isEnabled}", alarm.AlarmId, alarm.IsActive, alarm.IsEnabled);
+            LogAlarmAdded(alarm.AlarmId, alarm.IsActive, alarm.IsEnabled);
             Alarms = [.. Alarms, alarm];
         }
         else
         {
-            _logger.LogDebug("Alarm {alarmId} updated: active={isActive}, enabled={isEnabled}", alarm.AlarmId, alarm.IsActive, alarm.IsEnabled);
+            LogAlarmUpdated(alarm.AlarmId, alarm.IsActive, alarm.IsEnabled);
             Alarms = [.. Alarms.Select(a => a.AlarmId == alarm.AlarmId ? alarm : a)];
         }
 
@@ -322,12 +412,12 @@ public class AutotrainerDevice
 
         if (existing is null)
         {
-            _logger.LogDebug("Detector {detectorId} added: active={isActive}, enabled={isEnabled}", detector.DetectorId, detector.IsActive, detector.IsEnabled);
+            LogDetectorAdded(detector.DetectorId, detector.IsActive, detector.IsEnabled);
             Detectors = [.. Detectors, detector];
         }
         else
         {
-            _logger.LogDebug("Detector {detectorId} updated: active={isActive}, enabled={isEnabled}", detector.DetectorId, detector.IsActive, detector.IsEnabled);
+            LogDetectorUpdated(detector.DetectorId, detector.IsActive, detector.IsEnabled);
             Detectors = [.. Detectors.Select(d => d.DetectorId == detector.DetectorId ? detector : d)];
         }
 
@@ -362,6 +452,12 @@ public class AutotrainerDevice
     {
         Behavior.ApplyStatus(status);
         _hubContext.Clients.All.BehaviorChanged(Behavior);
+    }
+
+    private void OnReachEventsChanged(List<ReachEvent> reachEvents)
+    {
+        ReachEvents = reachEvents;
+        _hubContext.Clients.All.ReachEventsChanged(ReachEvents);
     }
 
     private void OnAnimalChanged(ApiAnimalStatus? status)
@@ -412,7 +508,7 @@ public class AutotrainerDevice
     {
         Configuration.ApplyStatus(config);
 
-        _logger.LogInformation("Data location updated to {location}", Configuration.DataLocation);
+        LogDataLocationUpdated(Configuration.DataLocation);
 
         _hubContext.Clients.All.SystemConfigurationChanged(config);
     }
@@ -428,7 +524,7 @@ public class AutotrainerDevice
         OnTunnelDeviceChanged(status.TunnelDevice);
         OnBehaviorChanged(status.Behavior);
 
-        _logger.LogInformation("System Status: {status}", status);
+        LogSystemStatus(status);
     }
 
     private static readonly JsonSerializerOptions s_JsonOptions = JsonDefaults.CamelCase;
@@ -444,4 +540,64 @@ public class AutotrainerDevice
 
         return element.Deserialize<T>(s_JsonOptions);
     }
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Heartbeat: {identifier} {when}")]
+    private partial void LogHeartbeat(string identifier, DateTimeOffset when);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "System configuration is missing or out of date.  Requesting update.")]
+    private partial void LogConfigurationOutOfDate();
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Event: {evet}")]
+    private partial void LogEvent(ApiEventKind evet);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "{kind} received with no animal identifier; skipping database select/create.")]
+    private partial void LogMissingAnimalIdentifier(ApiEventKind kind);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist animal info for {identifier}")]
+    private partial void LogPersistAnimalFailed(Exception ex, string identifier);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist reach events for {identifier}")]
+    private partial void LogPersistReachEventsFailed(Exception ex, string identifier);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Command response {command} {result}")]
+    private partial void LogCommandResponse(ApiCommandKind command, ApiCommandRequestResult result);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist system configuration")]
+    private partial void LogPersistConfigurationFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist alarm history for {alarmId}")]
+    private partial void LogPersistAlarmHistoryFailed(Exception ex, ApiAlarmKind alarmId);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist detector history for {detectorId}")]
+    private partial void LogPersistDetectorHistoryFailed(Exception ex, ApiDetectorKind detectorId);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Device data path: {path}")]
+    private partial void LogDeviceDataPath(string path);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Trial path: {path}")]
+    private partial void LogTrialPath(string path);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Web images path: {path}")]
+    private partial void LogWebImagesPath(string path);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Latest web image: {path}")]
+    private partial void LogLatestWebImage(string path);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Alarm {alarmId} added: active={isActive}, enabled={isEnabled}")]
+    private partial void LogAlarmAdded(ApiAlarmKind alarmId, bool isActive, bool isEnabled);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Alarm {alarmId} updated: active={isActive}, enabled={isEnabled}")]
+    private partial void LogAlarmUpdated(ApiAlarmKind alarmId, bool isActive, bool isEnabled);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Detector {detectorId} added: active={isActive}, enabled={isEnabled}")]
+    private partial void LogDetectorAdded(ApiDetectorKind detectorId, bool isActive, bool isEnabled);
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Detector {detectorId} updated: active={isActive}, enabled={isEnabled}")]
+    private partial void LogDetectorUpdated(ApiDetectorKind detectorId, bool isActive, bool isEnabled);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Data location updated to {location}")]
+    private partial void LogDataLocationUpdated(string location);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "System Status: {status}")]
+    private partial void LogSystemStatus(ApiSystemStatus status);
 }

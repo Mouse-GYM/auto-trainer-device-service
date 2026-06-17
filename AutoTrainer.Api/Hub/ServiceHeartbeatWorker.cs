@@ -2,7 +2,7 @@ using AutoTrainer.Api.ApiTypes;
 
 namespace AutoTrainer.Api.Hub;
 
-public class ServiceHeartbeatWorker : BackgroundService
+public partial class ServiceHeartbeatWorker : BackgroundService
 {
     private readonly IHubContext<MessageHub, IMessageHub> _hubContext;
 
@@ -26,9 +26,12 @@ public class ServiceHeartbeatWorker : BackgroundService
 
             await _hubContext.Clients.All.ServiceHeartbeat(heartbeat);
 
-            _logger.LogDebug("Service heartbeat sent");
+            LogHeartbeatSent();
 
             await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Debug, Message = "Service heartbeat sent")]
+    private partial void LogHeartbeatSent();
 }

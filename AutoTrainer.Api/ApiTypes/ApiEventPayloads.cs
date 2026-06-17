@@ -223,6 +223,16 @@ public static class ReachEventMethod
     public const string RightHand = "right_hand";
     public const string LeftHand = "left_hand";
     public const string Tongue = "tongue";
+
+    // Stable integer codes for persistence (ReachEventHistory.Method).
+    public static int ToCode(string method) => method switch
+    {
+        Other => 1,
+        RightHand => 2,
+        LeftHand => 3,
+        Tongue => 4,
+        _ => 0
+    };
 }
 
 public static class ReachEventOutcome
@@ -233,6 +243,17 @@ public static class ReachEventOutcome
     public const string Dropped = "dropped";
     public const string Grabbed = "grabbed";
     public const string Eaten = "eaten";
+
+    // Stable integer codes for persistence (ReachEventHistory.Outcome).
+    public static int ToCode(string outcome) => outcome switch
+    {
+        Stalled => 1,
+        Missed => 2,
+        Dropped => 3,
+        Grabbed => 4,
+        Eaten => 5,
+        _ => 0
+    };
 }
 
 // From autotrainer.core.ReachEvent

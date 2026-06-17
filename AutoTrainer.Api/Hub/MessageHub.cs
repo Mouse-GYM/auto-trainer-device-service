@@ -51,6 +51,8 @@ public interface IMessageHub
 
     Task BehaviorChanged(Behavior behavior);
 
+    Task ReachEventsChanged(List<ReachEvent> reachEvents);
+
     Task AnimalChanged(Animal? animal);
 
     Task SystemConfigurationChanged(ApiSystemConfiguration config);

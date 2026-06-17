@@ -7,7 +7,7 @@ using AutoTrainer.Api.Options;
 
 namespace AutoTrainer.Api.MessageQueue;
 
-public class MessageSubscriptionWorker : BackgroundService
+public partial class MessageSubscriptionWorker : BackgroundService
 {
     private readonly string _connection;
 
@@ -28,7 +28,7 @@ public class MessageSubscriptionWorker : BackgroundService
         (_hubContext, _device, _commandQueue, _emergencyQueue, _logger) = (hubContext, device, commandQueue, emergencyQueue, logger);
 
 
-        _logger.LogInformation("Message queue connection: {connection}", options.Value.Connection);
+        LogQueueConnection(options.Value.Connection);
 
         _connection = options.Value.Connection;
     }
@@ -37,16 +37,16 @@ public class MessageSubscriptionWorker : BackgroundService
     {
         await Task.Run(() =>
         {
-            _logger.LogInformation("Starting runtime: {time}", DateTimeOffset.Now);
+            LogStartingRuntime(DateTimeOffset.Now);
 
             using var runtime = new NetMQRuntime();
 
             runtime.Run(stoppingToken, SubscribeAsync(stoppingToken));
 
-            _logger.LogInformation("Ending runtime: {time}", DateTimeOffset.Now);
+            LogEndingRuntime(DateTimeOffset.Now);
         }, stoppingToken);
 
-        _logger.LogInformation("Worker ending at: {time}", DateTimeOffset.Now);
+        LogWorkerEnding(DateTimeOffset.Now);
     }
 
     private async Task SubscribeAsync(CancellationToken stoppingToken)
@@ -57,7 +57,7 @@ public class MessageSubscriptionWorker : BackgroundService
 
         subscriber.Subscribe("");
 
-        _logger.LogInformation("Subscribed");
+        LogSubscribed();
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -88,12 +88,12 @@ public class MessageSubscriptionWorker : BackgroundService
                                 var apiEvent = JsonSerializer.Deserialize<ApiEvent>(data, messageSerializerOptions);
                                 if (apiEvent != null)
                                 {
-                                    _logger.LogInformation("From Publisher| {topic}: {kind}", topic, apiEvent.Kind);
+                                    LogFromPublisher(topic, apiEvent.Kind);
                                     await _emergencyQueue.EnqueueAsync(apiEvent);
                                 }
                                 else
                                 {
-                                    _logger.LogWarning("Failed to deserialize emergency event");
+                                    LogDeserializeFailed();
                                 }
                             }
                             break;
@@ -115,7 +115,7 @@ public class MessageSubscriptionWorker : BackgroundService
                             }
                             break;
                         default:
-                            _logger.LogWarning("Unhandled topic {topic}", topic);
+                            LogUnhandledTopic(topic);
                             break;
                     }
 
@@ -123,8 +123,35 @@ public class MessageSubscriptionWorker : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError("{message}", ex.Message);
+                LogSubscriptionError(ex.Message);
             }
         }
     }
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Message queue connection: {connection}")]
+    private partial void LogQueueConnection(string connection);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Starting runtime: {time}")]
+    private partial void LogStartingRuntime(DateTimeOffset time);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Ending runtime: {time}")]
+    private partial void LogEndingRuntime(DateTimeOffset time);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Worker ending at: {time}")]
+    private partial void LogWorkerEnding(DateTimeOffset time);
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "Subscribed")]
+    private partial void LogSubscribed();
+
+    [LoggerMessage(Level = LogLevel.Information, Message = "From Publisher| {topic}: {kind}")]
+    private partial void LogFromPublisher(ApiTopic topic, ApiEventKind kind);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to deserialize emergency event")]
+    private partial void LogDeserializeFailed();
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Unhandled topic {topic}")]
+    private partial void LogUnhandledTopic(ApiTopic topic);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "{message}")]
+    private partial void LogSubscriptionError(string message);
 }
