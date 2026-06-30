@@ -1,6 +1,7 @@
 namespace AutoTrainer.Api.Data.Entities;
 
-public class AnimalInfo : SoftDeleteEntity
+// Append-only history: a new row per animalCreated/animalUpdated.
+public class AnimalHistory : SoftDeleteEntity
 {
     public string Identifier { get; set; } = "";
     public string Name { get; set; } = "";

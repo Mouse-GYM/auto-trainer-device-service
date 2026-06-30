@@ -12,6 +12,8 @@
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.1" />
+    <!-- See AutoTrainer.Api.csproj: overrides vulnerable/deprecated SQLitePCLRaw 2.1.11 (dotnet/efcore#38257). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.1" />
     <PackageReference Include="Moq" Version="4.20.72" />
   </ItemGroup>

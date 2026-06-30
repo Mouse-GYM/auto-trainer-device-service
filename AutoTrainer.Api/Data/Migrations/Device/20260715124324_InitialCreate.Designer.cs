@@ -11,7 +11,7 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace AutoTrainer.Api.Data.Migrations.Device
 {
     [DbContext(typeof(DeviceDbContext))]
-    [Migration("20260616192631_InitialCreate")]
+    [Migration("20260715124324_InitialCreate")]
     partial class InitialCreate
     {
         /// <inheritdoc />
@@ -56,6 +56,37 @@ namespace AutoTrainer.Api.Data.Migrations.Device
                     b.HasKey("Id");
 
                     b.ToTable("AlarmHistory", (string)null);
+                });
+
+            modelBuilder.Entity("AutoTrainer.Api.Data.Entities.Animal", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Identifier")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Identifier")
+                        .IsUnique();
+
+                    b.ToTable("Animal", (string)null);
                 });
 
             modelBuilder.Entity("AutoTrainer.Api.Data.Entities.DetectorHistory", b =>

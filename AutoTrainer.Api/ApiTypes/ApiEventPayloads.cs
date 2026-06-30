@@ -1,93 +1,150 @@
 namespace AutoTrainer.Api.ApiTypes;
 
+// Mirrors the *Context TypedDicts in autotrainer/api/event/api_event_payloads.py.
+// The kind -> payload map is the build_event overload set in autotrainer/api/event/build_event.py.
+//
+// Events with no payload (AlgorithmPause, AlgorithmResume, TunnelEnter, TunnelExit, HeadfixAutoTare,
+// CalibrationDcsCompleted, Calibration3dCompleted, Unknown) have no class here.
+// SystemStatus, DetectorChanged, AlarmChanged, and Animal* use the status types in ApiSystemStatus.cs.
+
 // ──────────────────────────────────────────────
 // Shared payload types (used by multiple events)
 // ──────────────────────────────────────────────
 
-// Used by: EmergencyResume, ApplicationTerminating, CalibrationDcsFailed, Calibration3dFailed, TrialCaptureEnded
+// ReasonContext
+// Used by: EmergencyResume, ApplicationTerminating, CalibrationDcsFailed, Calibration3dFailed
 public class ApiReasonPayload
 {
     public string Reason { get; set; } = "";
 }
 
+// SessionTrialContext — identifies a trial within a session; for trial-scoped events with no other data.
+// Used by: TrialCaptureEnded, TrialPelletPresented
+public class ApiSessionTrialPayload
+{
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+}
+
+// AnalysisTrialContext — a trial-scoped analysis-phase event, plus the batch that produced it.
+// BatchId is null when there is no batch (inline analysis, or analysis disabled).
+// Used by: IntertrialSegmentationBegin, IntertrialSegmentationEnd,
+//          IntertrialDetectionBegin, IntertrialDetectionEnd
+public class ApiAnalysisTrialPayload
+{
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }
+}
+
+// TrialSeenContext — a first-sighting event.
+// DEPRECATED FIELD: BatchId on these events is meaningless and must not be read. They are emitted during
+// capture, before any batch exists. The key is retained only for producer compatibility.
+// Used by: TrialAnimalSeen, TrialRightHandSeen, TrialPelletSeen
+public class ApiTrialSeenPayload
+{
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }   // DEPRECATED / ignored — do not read.
+}
+
+// CommandContext — correlates a hardware command with its acknowledgement.
 // Used by: PelletLoadBegin, PelletLoadEnd, PelletSendBegin, PelletSendEnd, PelletCoverBegin, PelletCoverEnd,
-//          PelletReleaseBegin, PelletReleaseEnd, PelletHomeBegin, PelletHomeEnd, PelletRetractBegin, PelletRetractEnd,
-//          TunnelGateOpenBegin, TunnelGateOpenEnd, TunnelGateCloseBegin, TunnelGateCloseEnd,
-//          TunnelFanOnBegin, TunnelFanOnEnd, TunnelFanOffBegin, TunnelFanOffEnd,
+//          PelletReleaseBegin, PelletReleaseEnd, PelletHomeBegin, PelletHomeEnd, PelletRetractBegin,
+//          PelletRetractEnd, TunnelGateOpenBegin, TunnelGateOpenEnd, TunnelGateCloseBegin,
+//          TunnelGateCloseEnd, TunnelFanOnBegin, TunnelFanOnEnd, TunnelFanOffBegin, TunnelFanOffEnd,
 //          DeviceCommandSend, DeviceCommandAcknowledge
-public class ApiContextPayload
+public class ApiCommandPayload
 {
     public string Context { get; set; } = "";
 }
 
-// Used by: HeadfixLoadCellEnabledChanged, HeadfixLoadCellChangedInIntersession, HeadfixLoadCellChangedWrongState,
-//          HeadFixationForceDetectorChanged, AutoClampEnabledChanged
-public class ApiEnabledChangedPayload
+// IsEnabledContext
+// Used by: HeadfixLoadCellEnabledChanged, HeadfixLoadCellChangedInIntersession,
+//          HeadfixLoadCellChangedWrongState, HeadFixationForceDetectorChanged, AutoClampEnabledChanged
+public class ApiIsEnabledPayload
 {
     public bool IsEnabled { get; set; }
 }
 
+// IsEngagedContext
 // Used by: LoadCellEngagedChanged, HeadbarPressureEngagedChanged
-public class ApiEngagedChangedPayload
+public class ApiIsEngagedPayload
 {
     public bool IsEngaged { get; set; }
 }
 
+// IntertrialErrorContext. Sending this is assumed to also indicate the corresponding non-error event.
 // Used by: IntertrialSegmentationError, IntertrialSegmentationSaveError,
 //          IntertrialDetectionError, IntertrialDetectionSaveError
-public class ApiErrorPayload
+public class ApiIntertrialErrorPayload
 {
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }
     public string Error { get; set; } = "";
 }
 
+// IntertrialSaveContext
 // Used by: IntertrialSegmentationSave, IntertrialDetectionSave
-public class ApiLocationPayload
+public class ApiIntertrialSavePayload
 {
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }
     public string Location { get; set; } = "";
 }
 
-// Used by: PelletPresentedCountChanged, PelletConsumedCountChanged, ReachCountChanged, SuccessfulReachesCountChanged,
-//          DayPelletPresentedCountChanged, DayPelletConsumedCountChanged, DayReachCountChanged, DaySuccessfulReachesCountChanged
-public class ApiCountChangedPayload
+// CountChangeContext — a running counter update.
+// Used by: PelletPresentedCountChanged, PelletConsumedCountChanged, ReachCountChanged,
+//          SuccessfulReachesCountChanged, DayPelletPresentedCountChanged, DayPelletConsumedCountChanged,
+//          DayReachCountChanged, DaySuccessfulReachesCountChanged
+public class ApiCountChangePayload
 {
     public int Change { get; set; }
     public int Count { get; set; }
 }
 
+// IntensityContext
 // Used by: AutoClampIntensityChanged, AutoClampEngaged, AutoClampPreDisengage, AutoClampDisengaged
 public class ApiIntensityPayload
 {
     public double Intensity { get; set; }
 }
 
+// TrainingPhaseContext
 // Used by: TrainingPhaseEnter, TrainingPhaseExit, TrainingProgressUpdate
 public class ApiTrainingPhasePayload
 {
     public string TrainingPhaseId { get; set; } = "";
 }
 
-// AnimalCreated, AnimalUpdated, AnimalSelected use Payload <ApiAnimalStatus> directly (no wrapper class needed).
-
 // ──────────────────────────────────────────────
 // Core/System (0000-0999)
 // ──────────────────────────────────────────────
 
+// EmergencyStopContext
 public class ApiEmergencyStopPayload
 {
     public string Reason { get; set; } = "";
     public List<ApiAlarmKind> ActiveAlarms { get; set; } = [];
 }
 
-public class ApiApplicationLaunchedPayload
+// VersionContext
+// Used by: ApplicationLaunched
+public class ApiVersionPayload
 {
     public string Version { get; set; } = "";
 }
 
-public class ApiApplicationModeChangedPayload
+// ApplicationModeContext
+// Used by: ApplicationModeChanged
+public class ApiApplicationModePayload
 {
     public ApiApplicationMode Mode { get; set; }
 }
 
+// PropertyChangedContext
 public class ApiPropertyChangedPayload
 {
     public int Target { get; set; }
@@ -96,82 +153,141 @@ public class ApiPropertyChangedPayload
     public JsonElement? OldValue { get; set; }
 }
 
+// ProjectChangedContext
 public class ApiProjectChangedPayload
 {
     public string Root { get; set; } = "";
     public string DeviceId { get; set; } = "";
     public string Day { get; set; } = "";
-    public int Session { get; set; }
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
 }
 
-public class ApiProjectSessionChangedPayload
+// ProjectTrialChangedContext
+public class ApiProjectTrialChangedPayload
 {
     public string Root { get; set; } = "";
-    public int Session { get; set; }
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
 }
 
 // ──────────────────────────────────────────────
 // Behavior (1000-1999)
 // ──────────────────────────────────────────────
 
+// PelletHomeResetContext
 public class ApiPelletHomeResetPayload
 {
     public int Cycles { get; set; }
 }
 
+// PelletDriftResetContext
 public class ApiPelletDriftResetPayload
 {
     public ApiVector3 Drift { get; set; }
 }
 
+// SessionStartedContext
+public class ApiSessionStartedPayload
+{
+    public string SessionId { get; set; } = "";
+    public bool IsAnalysisDeferred { get; set; }
+}
+
+// SessionEndedContext
+public class ApiSessionEndedPayload
+{
+    public string SessionId { get; set; } = "";
+    public int CaptureTrialCount { get; set; }
+    public int AnalysisTrialCount { get; set; }
+    public int FailedTrialCount { get; set; }
+}
+
+// TrialStartedContext
+public class ApiTrialStartedPayload
+{
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string Reason { get; set; } = "";
+}
+
+// TrialEndedContext. Result is a CaptureAnalysisResult value: capture_only, analysis_succeeded,
+// analysis_failed, analysis_delayed.
 public class ApiTrialEndedPayload
 {
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
     public string Result { get; set; } = "";
 }
 
+// BatchAnalysisStartedContext
 public class ApiBatchAnalysisStartedPayload
 {
-    public int Count { get; set; }
+    public string SessionId { get; set; } = "";
+    public string BatchId { get; set; } = "";
+    public int AnalysisTrialCount { get; set; }
 }
 
+// BatchAnalysisEndedContext
 public class ApiBatchAnalysisEndedPayload
 {
-    public int FailedCount { get; set; }
+    public string SessionId { get; set; } = "";
+    public string BatchId { get; set; } = "";
+    public int AnalysisTrialCount { get; set; }
+    public int FailedTrialCount { get; set; }
 }
 
-public class ApiHeadfixBaselineChangedPayload
+// BaselineContext — the "make baseline" value, not a hardware command.
+// Used by: HeadfixBaselineChanged
+public class ApiBaselinePayload
 {
     public double Baseline { get; set; }
 }
 
-public class ApiAutoClampReleaseToneFreqChangedPayload
+// FrequencyContext
+// Used by: AutoClampReleaseToneFreqChanged
+public class ApiFrequencyPayload
 {
     public double Frequency { get; set; }
 }
 
-public class ApiAutoClampReleaseDelayChangedPayload
+// DelayContext
+// Used by: AutoClampReleaseDelayChanged
+public class ApiDelayPayload
 {
     public double Delay { get; set; }
 }
 
-public class ApiAutoClampPlayReleaseTonePayload
+// ReleaseToneContext
+// Used by: AutoClampPlayReleaseTone
+public class ApiReleaseTonePayload
 {
     public double Frequency { get; set; }
     public double Duration { get; set; }
 }
 
+// DayStartedContext — seconds since the epoch.
 public class ApiDayStartedPayload
 {
     public double Date { get; set; }
 }
 
+// TrialReachEventsContext
 public class ApiTrialReachEventsPayload
 {
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }
     public List<ReachEvent> TrialReachEvents { get; set; } = [];
 }
 
-public class ApiIntertrialPelletShiftPayload
+// PelletShiftContext — sent for any calculated pellet shift, even if not applied.
+// Used by: IntertrialPelletShift
+public class ApiPelletShiftPayload
 {
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }
     public ApiPelletShiftSource Source { get; set; }
     public ApiVector3 Shift { get; set; }
     public bool Deferred { get; set; }
@@ -181,12 +297,16 @@ public class ApiIntertrialPelletShiftPayload
 // Training (5000-5999)
 // ──────────────────────────────────────────────
 
-public class ApiTrainingModeChangedPayload
+// TrainingModeContext
+// Used by: TrainingModeChanged
+public class ApiTrainingModePayload
 {
     public ApiTrainingMode TrainingMode { get; set; }
 }
 
-public class ApiTrainingPlanLoadPayload
+// TrainingPlanContext
+// Used by: TrainingPlanLoad
+public class ApiTrainingPlanPayload
 {
     public string TrainingPlanId { get; set; } = "";
 }
@@ -224,7 +344,7 @@ public static class ReachEventMethod
     public const string LeftHand = "left_hand";
     public const string Tongue = "tongue";
 
-    // Stable integer codes for persistence (ReachEventHistory.Method).
+    // Stable integer codes for persistence (ReachEvent.Method).
     public static int ToCode(string method) => method switch
     {
         Other => 1,
@@ -244,7 +364,7 @@ public static class ReachEventOutcome
     public const string Grabbed = "grabbed";
     public const string Eaten = "eaten";
 
-    // Stable integer codes for persistence (ReachEventHistory.Outcome).
+    // Stable integer codes for persistence (ReachEvent.Outcome).
     public static int ToCode(string outcome) => outcome switch
     {
         Stalled => 1,
@@ -256,7 +376,7 @@ public static class ReachEventOutcome
     };
 }
 
-// From autotrainer.core.ReachEvent
+// ReachEventDict — from autotrainer.core.ReachEvent
 public class ReachEvent
 {
     public int Init { get; set; }
@@ -267,6 +387,7 @@ public class ReachEvent
     public double DelaySincePresented { get; set; }
 }
 
+// Vector3Context
 public struct ApiVector3
 {
     public double X { get; set; }

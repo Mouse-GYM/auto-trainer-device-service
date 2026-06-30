@@ -23,16 +23,18 @@ public class ApiSystemStatus
 
 public readonly record struct ApiProjectStatus
 {
+    // Absolute path to the current day's directory; the YYYYMMDD day is its final component.
     public string DayPath { get; init; }
-    public int SessionIndex { get; init; }
+    public int TrialId { get; init; }
+    public string SessionId { get; init; }
 }
 
 public readonly record struct ApiReachStatus
 {
-    public double PelletsPresented { get; init; }
-    public double PelletsConsumed { get; init; }
-    public double Reaches { get; init; }
-    public double SuccessfulReaches { get; init; }
+    public int PelletsPresented { get; init; }
+    public int PelletsConsumed { get; init; }
+    public int Reaches { get; init; }
+    public int SuccessfulReaches { get; init; }
 }
 
 public readonly record struct ApiBehaviorStatus

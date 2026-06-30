@@ -12,11 +12,23 @@ public class SqliteStorageTests
     private static SqliteStorage Create(string location) =>
         new(Microsoft.Extensions.Options.Options.Create(new DataOptions { SQLLiteLocation = location }), NullLogger<SqliteStorage>.Instance);
 
-    [Fact]
-    public void EmptyLocation_UsesCurrentDirectory()
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void UnsetLocation_UsesHomeDirectoryDefault(string location)
     {
-        var storage = Create("");
-        Assert.Equal(Directory.GetCurrentDirectory(), storage.RootPath);
+        var storage = Create(location);
+
+        var expected = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".autotrainer", "internal", "data");
+
+        Assert.Equal(expected, storage.RootPath);
+        Assert.Equal(expected, SqliteStorage.DefaultRootPath());
+
+        // Rooted under the home directory, not wherever the process was launched from.
+        Assert.True(Path.IsPathRooted(storage.RootPath));
+        Assert.NotEqual(Directory.GetCurrentDirectory(), storage.RootPath);
     }
 
     [Fact]

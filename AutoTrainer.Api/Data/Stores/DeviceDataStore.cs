@@ -11,6 +11,14 @@ public interface IDeviceDataStore
     Task AddDetectorHistoryAsync(ApiDetectorStatus status, CancellationToken ct = default);
     Task<IReadOnlyList<Entities.AlarmHistory>> GetAlarmHistoryAsync(DateTime since, CancellationToken ct = default);
     Task<IReadOnlyList<Entities.DetectorHistory>> GetDetectorHistoryAsync(DateTime since, CancellationToken ct = default);
+
+    // Ensure the device-level registry has a row for this animal (created when its per-animal database is
+    // first created). No-op if it is already registered; does not touch the name.
+    Task RegisterAnimalAsync(string identifier, CancellationToken ct = default);
+
+    // Set the registry name for an animal (from .animalSelected/.animalUpdated). Creates the row if missing,
+    // and only writes when the name actually changes.
+    Task SetAnimalNameAsync(string identifier, string name, CancellationToken ct = default);
 }
 
 public partial class DeviceDataStore(
@@ -102,5 +110,32 @@ public partial class DeviceDataStore(
             .Where(d => d.CreatedAt >= since)
             .OrderByDescending(d => d.CreatedAt)
             .ToListAsync(ct);
+    }
+
+    public async Task RegisterAnimalAsync(string identifier, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        if (await db.Animals.AnyAsync(a => a.Identifier == identifier, ct))
+            return;
+
+        db.Animals.Add(new Entities.Animal { Identifier = identifier });
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task SetAnimalNameAsync(string identifier, string name, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var animal = await db.Animals.FirstOrDefaultAsync(a => a.Identifier == identifier, ct);
+
+        if (animal is null)
+            db.Animals.Add(new Entities.Animal { Identifier = identifier, Name = name });
+        else if (animal.Name != name)
+            animal.Name = name;
+        else
+            return;   // already correct; nothing to write
+
+        await db.SaveChangesAsync(ct);
     }
 }

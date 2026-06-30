@@ -20,7 +20,7 @@ public enum ApiEventKind
     SystemStatus = 601,
 
     ProjectChanged = 701,
-    ProjectSessionChanged = 702,
+    ProjectTrialChanged = 702,
 
     // Behavior (1000-1999)
     AlgorithmPause = 1001,
@@ -66,6 +66,9 @@ public enum ApiEventKind
 
     BatchAnalysisStarted = 1321,
     BatchAnalysisEnded = 1322,
+
+    SessionStarted = 1331,
+    SessionEnded = 1332,
 
     HeadfixLoadCellEnabledChanged = 1401,
     HeadfixLoadCellChangedInIntersession = 1405,
@@ -148,5 +151,8 @@ public enum ApiEventKind
     // Animal (7000-7999)
     AnimalCreated = 7001,
     AnimalUpdated = 7002,
-    AnimalSelected = 7003
+    AnimalSelected = 7003,
+
+    // Utility
+    Unknown = 999999
 }

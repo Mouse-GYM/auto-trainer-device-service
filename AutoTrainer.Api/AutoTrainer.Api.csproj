@@ -9,6 +9,13 @@
   <ItemGroup>
     <PackageReference Include="AWSSDK.SimpleNotificationService" Version="4.0.2.10" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.1" />
+    <!--
+      Overrides the vulnerable + deprecated SQLitePCLRaw 2.1.11 stack that EF Core 10.0.1 pulls in
+      transitively (CVE-2025-6965 / GHSA-2m69-gcr7-jv3q; lib.e_sqlite3 renamed to SourceGear.sqlite3).
+      Bundle 3.0.x ships patched SQLite 3.50.3 with no SQLitePCLRaw.core code changes, so EF Core is
+      unaffected. Remove once EF Core ships the fix (dotnet/efcore#38257, milestone 10.0.11).
+    -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.3" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.1">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>

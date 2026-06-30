@@ -13,6 +13,7 @@ public static class DeviceEndpoints
         device.MapGet("/cage/latest", GetLatestCageImage);
         device.MapGet("/alarms", GetAlarmHistory);
         device.MapGet("/detectors", GetDetectorHistory);
+        device.MapGet("/reaches", GetReachEventHistory);
 
         return app;
     }
@@ -33,6 +34,22 @@ public static class DeviceEndpoints
             return Results.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
 
         var rows = await store.GetDetectorHistoryAsync(DateTime.UtcNow - window, ct);
+
+        return Results.Ok(rows);
+    }
+
+    private static async Task<IResult> GetReachEventHistory(string? within, string? animal, AutotrainerDevice device, IAnimalDataStore store, CancellationToken ct)
+    {
+        if (!TimeWindow.TryParse(within, out var window))
+            return Results.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
+
+        // Reach history lives in the per-animal database. Use the requested animal, otherwise the selected one.
+        var identifier = !string.IsNullOrWhiteSpace(animal) ? animal : device.Animal?.Identifier;
+
+        if (string.IsNullOrWhiteSpace(identifier))
+            return Results.BadRequest("No animal specified and no animal is currently selected.");
+
+        var rows = await store.GetReachEventHistoryAsync(identifier, DateTime.UtcNow - window, ct);
 
         return Results.Ok(rows);
     }

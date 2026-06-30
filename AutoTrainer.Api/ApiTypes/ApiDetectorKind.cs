@@ -13,6 +13,7 @@ public enum ApiDetectorKind
     TunnelStatusMessageInterruption = 412,
 
     LowFreeDiskSpace = 501,
+    MainThreadFrozen = 511,
 
     PelletRefillCountExceeded = 601,
     CageCleaningRequired = 610,

@@ -55,6 +55,37 @@ namespace AutoTrainer.Api.Data.Migrations.Device
                     b.ToTable("AlarmHistory", (string)null);
                 });
 
+            modelBuilder.Entity("AutoTrainer.Api.Data.Entities.Animal", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Identifier")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Identifier")
+                        .IsUnique();
+
+                    b.ToTable("Animal", (string)null);
+                });
+
             modelBuilder.Entity("AutoTrainer.Api.Data.Entities.DetectorHistory", b =>
                 {
                     b.Property<int>("Id")

@@ -33,6 +33,23 @@ namespace AutoTrainer.Api.Data.Migrations.Device
                 });
 
             migrationBuilder.CreateTable(
+                name: "Animal",
+                columns: table => new
+                {
+                    Id = table.Column<int>(type: "INTEGER", nullable: false)
+                        .Annotation("Sqlite:Autoincrement", true),
+                    Identifier = table.Column<string>(type: "TEXT", nullable: false),
+                    Name = table.Column<string>(type: "TEXT", nullable: false),
+                    CreatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
+                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
+                    DeletedAt = table.Column<DateTime>(type: "TEXT", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_Animal", x => x.Id);
+                });
+
+            migrationBuilder.CreateTable(
                 name: "DetectorHistory",
                 columns: table => new
                 {
@@ -71,6 +88,12 @@ namespace AutoTrainer.Api.Data.Migrations.Device
                 {
                     table.PrimaryKey("PK_SystemConfiguration", x => x.Id);
                 });
+
+            migrationBuilder.CreateIndex(
+                name: "IX_Animal_Identifier",
+                table: "Animal",
+                column: "Identifier",
+                unique: true);
         }
 
         /// <inheritdoc />
@@ -78,6 +101,9 @@ namespace AutoTrainer.Api.Data.Migrations.Device
         {
             migrationBuilder.DropTable(
                 name: "AlarmHistory");
+
+            migrationBuilder.DropTable(
+                name: "Animal");
 
             migrationBuilder.DropTable(
                 name: "DetectorHistory");

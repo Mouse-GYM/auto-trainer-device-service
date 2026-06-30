@@ -28,9 +28,18 @@ public class SqliteStorage : ISqliteStorage
         var location = options.Value.SQLLiteLocation;
 
         RootPath = string.IsNullOrWhiteSpace(location)
-            ? Directory.GetCurrentDirectory()
+            ? DefaultRootPath()
             : Path.GetFullPath(location);
     }
+
+    // When no location is configured, data lives under the user's home directory rather than wherever the
+    // process happened to be launched from. SpecialFolder.UserProfile resolves the home directory on every
+    // platform (%USERPROFILE% on Windows, $HOME elsewhere).
+    //
+    // The root holds the device/ and animals/ subdirectories, so it is deliberately not named "device".
+    public static string DefaultRootPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".autotrainer", "internal", "data");
 
     public string RootPath { get; }
 

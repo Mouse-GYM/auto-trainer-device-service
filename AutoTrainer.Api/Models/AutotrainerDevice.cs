@@ -1,5 +1,6 @@
 using AutoTrainer.Api.ApiTypes;
 using AutoTrainer.Api.CommandQueue;
+using AutoTrainer.Api.Data;
 using AutoTrainer.Api.Data.Stores;
 using AutoTrainer.Api.Hub;
 
@@ -99,7 +100,9 @@ public partial class AutotrainerDevice
     {
         _updateChannel.Writer.TryWrite(async () =>
         {
-            JsonElement? context = apiEvent.Context is JsonElement c ? c : null;
+            // The payload type is a function of the kind alone (an event carries no type tag), so it is
+            // resolved once, here, from ApiEventPayloadMap -- the mirror of the Python build_event map.
+            var payload = DeserializePayload(apiEvent);
 
             LogEvent(apiEvent.Kind);
 
@@ -107,42 +110,40 @@ public partial class AutotrainerDevice
             {
                 case ApiEventKind.AlarmChanged:
                     {
-                        var ctx = context?.Deserialize<ApiAlarmStatus>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiAlarmStatus ctx)
                         {
-                            OnAlarmChanged(ctx.Value);
+                            OnAlarmChanged(ctx);
 
                             try
                             {
-                                await _deviceStore.AddAlarmHistoryAsync(ctx.Value);
+                                await _deviceStore.AddAlarmHistoryAsync(ctx);
                             }
                             catch (Exception ex)
                             {
-                                LogPersistAlarmHistoryFailed(ex, ctx.Value.AlarmId);
+                                LogPersistAlarmHistoryFailed(ex, ctx.AlarmId);
                             }
                         }
                         break;
                     }
                 case ApiEventKind.DetectorChanged:
                     {
-                        var ctx = context?.Deserialize<ApiDetectorStatus>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiDetectorStatus ctx)
                         {
-                            OnDetectorChanged(ctx.Value);
+                            OnDetectorChanged(ctx);
 
                             try
                             {
-                                await _deviceStore.AddDetectorHistoryAsync(ctx.Value);
+                                await _deviceStore.AddDetectorHistoryAsync(ctx);
                             }
                             catch (Exception ex)
                             {
-                                LogPersistDetectorHistoryFailed(ex, ctx.Value.DetectorId);
+                                LogPersistDetectorHistoryFailed(ex, ctx.DetectorId);
                             }
                         }
                         break;
                     }
+                // Tunnel events no longer define a session -- the producer does, and every lifecycle event
+                // carries its session_id. They still drive system state and reach the hub.
                 case ApiEventKind.TunnelEnter:
                     {
                         SystemState = SystemState.Tunnel;
@@ -159,11 +160,123 @@ public partial class AutotrainerDevice
 
                         break;
                     }
+                case ApiEventKind.SessionStarted:
+                    {
+                        if (payload is ApiSessionStartedPayload ctx)
+                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplySessionStartedAsync(
+                                id, ctx.SessionId, ToUtc(apiEvent.When), ctx.IsAnalysisDeferred));
+                        break;
+                    }
+                case ApiEventKind.SessionEnded:
+                    {
+                        if (payload is ApiSessionEndedPayload ctx)
+                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplySessionEndedAsync(
+                                id, ctx.SessionId, ToUtc(apiEvent.When),
+                                ctx.CaptureTrialCount, ctx.AnalysisTrialCount, ctx.FailedTrialCount));
+                        break;
+                    }
+                case ApiEventKind.BatchAnalysisStarted:
+                    {
+                        if (payload is ApiBatchAnalysisStartedPayload ctx)
+                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplyBatchAnalysisStartedAsync(
+                                id, ctx.SessionId, ctx.BatchId, ToUtc(apiEvent.When), ctx.AnalysisTrialCount));
+                        break;
+                    }
+                case ApiEventKind.BatchAnalysisEnded:
+                    {
+                        if (payload is ApiBatchAnalysisEndedPayload ctx)
+                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplyBatchAnalysisEndedAsync(
+                                id, ctx.SessionId, ctx.BatchId, ToUtc(apiEvent.When),
+                                ctx.AnalysisTrialCount, ctx.FailedTrialCount));
+                        break;
+                    }
+                case ApiEventKind.TrialStarted:
+                    {
+                        if (payload is ApiTrialStartedPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, null, ToUtc(apiEvent.When))
+                                {
+                                    Reason = ctx.Reason
+                                });
+                        break;
+                    }
+                case ApiEventKind.TrialEnded:
+                    {
+                        if (payload is ApiTrialEndedPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, null, ToUtc(apiEvent.When))
+                                {
+                                    Result = ctx.Result
+                                });
+                        break;
+                    }
+                case ApiEventKind.TrialCaptureEnded:
+                case ApiEventKind.TrialPelletPresented:
+                    {
+                        if (payload is ApiSessionTrialPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, null, ToUtc(apiEvent.When)));
+                        break;
+                    }
+                case ApiEventKind.TrialAnimalSeen:
+                case ApiEventKind.TrialRightHandSeen:
+                case ApiEventKind.TrialPelletSeen:
+                    {
+                        // BatchId is deliberately not read: it is deprecated and meaningless on these events
+                        // (they fire during capture, before any batch exists). Reading it would create a
+                        // bogus BatchAnalysis row.
+                        if (payload is ApiTrialSeenPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, null, ToUtc(apiEvent.When)));
+                        break;
+                    }
+                case ApiEventKind.IntertrialSegmentationBegin:
+                case ApiEventKind.IntertrialSegmentationEnd:
+                case ApiEventKind.IntertrialDetectionBegin:
+                case ApiEventKind.IntertrialDetectionEnd:
+                    {
+                        if (payload is ApiAnalysisTrialPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, ctx.BatchId, ToUtc(apiEvent.When)));
+                        break;
+                    }
+                case ApiEventKind.IntertrialSegmentationError:
+                case ApiEventKind.IntertrialSegmentationSaveError:
+                case ApiEventKind.IntertrialDetectionError:
+                case ApiEventKind.IntertrialDetectionSaveError:
+                    {
+                        if (payload is ApiIntertrialErrorPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, ctx.BatchId, ToUtc(apiEvent.When))
+                                {
+                                    Error = ctx.Error
+                                });
+                        break;
+                    }
+                case ApiEventKind.IntertrialSegmentationSave:
+                case ApiEventKind.IntertrialDetectionSave:
+                    {
+                        if (payload is ApiIntertrialSavePayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, ctx.BatchId, ToUtc(apiEvent.When))
+                                {
+                                    Location = ctx.Location
+                                });
+                        break;
+                    }
+                case ApiEventKind.IntertrialPelletShift:
+                    {
+                        if (payload is ApiPelletShiftPayload ctx)
+                            await ApplyTrialEventAsync(apiEvent,
+                                new TrialEventValues(ctx.SessionId, ctx.TrialId, ctx.BatchId, ToUtc(apiEvent.When))
+                                {
+                                    PelletShiftJson = JsonSerializer.Serialize(ctx, s_JsonOptions)
+                                });
+                        break;
+                    }
                 case ApiEventKind.LoadCellEngagedChanged:
                     {
-                        var ctx = context?.Deserialize<ApiEngagedChangedPayload>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiIsEngagedPayload ctx)
                         {
                             Analysis.LoadCellEngaged = ctx.IsEngaged;
                             await _hubContext.Clients.All.AnalysisChanged(Analysis);
@@ -172,9 +285,7 @@ public partial class AutotrainerDevice
                     }
                 case ApiEventKind.HeadbarPressureEngagedChanged:
                     {
-                        var ctx = context?.Deserialize<ApiEngagedChangedPayload>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiIsEngagedPayload ctx)
                         {
                             Analysis.HeadbarPressureEngaged = ctx.IsEngaged;
                             await _hubContext.Clients.All.AnalysisChanged(Analysis);
@@ -183,9 +294,7 @@ public partial class AutotrainerDevice
                     }
                 case ApiEventKind.HeadfixBaselineChanged:
                     {
-                        var ctx = context?.Deserialize<ApiHeadfixBaselineChangedPayload>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiBaselinePayload ctx)
                         {
                             Behavior.BaselineMagnetIntensity = ctx.Baseline;
                             await _hubContext.Clients.All.BehaviorChanged(Behavior);
@@ -194,11 +303,10 @@ public partial class AutotrainerDevice
                     }
                 case ApiEventKind.HeadfixLoadCellEnabledChanged:
                     {
-                        var ctx = context?.Deserialize<ApiEngagedChangedPayload>(s_JsonOptions);
-
-                        if (ctx != null)
+                        // This event's payload is IsEnabledContext ("isEnabled"), not IsEngagedContext.
+                        if (payload is ApiIsEnabledPayload ctx)
                         {
-                            Behavior.LoadCellEnabled = ctx.IsEngaged;
+                            Behavior.LoadCellEnabled = ctx.IsEnabled;
                             await _hubContext.Clients.All.BehaviorChanged(Behavior);
                         }
                         break;
@@ -211,9 +319,9 @@ public partial class AutotrainerDevice
                 case ApiEventKind.PelletHomeReset:
                 case ApiEventKind.PelletDriftReset:
                     {
-                        var ctx = context?.Deserialize<ApiContextPayload>(s_JsonOptions);
-
-                        if (ctx != null)
+                        // These do not share one payload type (the Begin events are CommandContext, the resets
+                        // carry their own), and nothing here reads it -- only that a payload arrived at all.
+                        if (payload != null)
                         {
                             PelletDevice.UpdateLastCommand(apiEvent);
                             await _hubContext.Clients.All.PelletDeviceChanged(PelletDevice);
@@ -222,20 +330,18 @@ public partial class AutotrainerDevice
                     }
                 case ApiEventKind.SystemStatus:
                     {
-                        var ctx = context?.Deserialize<ApiSystemStatus>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiSystemStatus ctx)
                         {
                             OnSystemStatusChanged(ctx);
+
+                            await PersistReachStatusAsync(ctx);
                         }
                         break;
                     }
                 case ApiEventKind.AnimalSelected:
                 case ApiEventKind.AnimalUpdated:
                     {
-                        var ctx = context?.Deserialize<ApiAnimalStatus>(s_JsonOptions);
-
-                        if (ctx is { } status)
+                        if (payload is ApiAnimalStatus status)
                         {
                             if (string.IsNullOrWhiteSpace(status.Identifier))
                             {
@@ -243,9 +349,13 @@ public partial class AutotrainerDevice
                             }
                             else
                             {
+                                // The selection drives which animal database every lifecycle event is written
+                                // to, so apply it here rather than waiting for the next systemStatus.
+                                OnAnimalChanged(status);
+
                                 try
                                 {
-                                    await _animalStore.AddAnimalInfoAsync(status);
+                                    await _animalStore.AddAnimalHistoryAsync(status);
                                 }
                                 catch (Exception ex)
                                 {
@@ -253,33 +363,23 @@ public partial class AutotrainerDevice
                                 }
                             }
                         }
+                        else if (apiEvent.Kind == ApiEventKind.AnimalSelected)
+                        {
+                            // animalSelected carries an optional payload; no payload means the selection was
+                            // cleared. Clear it here too, or later events would keep writing to this animal.
+                            OnAnimalChanged(null);
+                        }
                         break;
                     }
                 case ApiEventKind.TrialReachEvents:
                     {
-                        var ctx = context?.Deserialize<ApiTrialReachEventsPayload>(s_JsonOptions);
-
-                        if (ctx != null)
+                        if (payload is ApiTrialReachEventsPayload ctx)
                         {
                             OnReachEventsChanged(ctx.TrialReachEvents);
 
-                            var identifier = Animal?.Identifier;
-
-                            if (string.IsNullOrWhiteSpace(identifier))
-                            {
-                                LogMissingAnimalIdentifier(apiEvent.Kind);
-                            }
-                            else if (ctx.TrialReachEvents.Count > 0)
-                            {
-                                try
-                                {
-                                    await _animalStore.AddReachEventHistoryAsync(identifier, ctx.TrialReachEvents);
-                                }
-                                catch (Exception ex)
-                                {
-                                    LogPersistReachEventsFailed(ex, identifier);
-                                }
-                            }
+                            // No Count > 0 guard: an empty list must still replace the trial's existing rows.
+                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ReplaceTrialReachEventsAsync(
+                                id, ctx.SessionId, ctx.TrialId, ctx.BatchId, ctx.TrialReachEvents));
                         }
                         break;
                     }
@@ -460,6 +560,80 @@ public partial class AutotrainerDevice
         _hubContext.Clients.All.ReachEventsChanged(ReachEvents);
     }
 
+    // Resolves the payload type from the kind (the event's only discriminator) and deserializes the context
+    // into it. Returns null when the kind has no payload, the event carried none, or the payload is malformed
+    // -- a bad payload must not take down the whole event (the broadcast still has to happen).
+    private object? DeserializePayload(ApiEvent apiEvent)
+    {
+        if (apiEvent.Context is not JsonElement element || element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return null;
+
+        var type = ApiEventPayloadMap.PayloadType(apiEvent.Kind);
+
+        if (type is null)
+            return null;
+
+        try
+        {
+            return element.Deserialize(type, s_JsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            LogPayloadDeserializeFailed(ex, apiEvent.Kind, type.Name);
+            return null;
+        }
+    }
+
+    private Task ApplyTrialEventAsync(ApiEvent apiEvent, TrialEventValues values) =>
+        PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplyTrialEventAsync(id, apiEvent.Kind, values));
+
+    // Every animal-database write goes through here. If no animal is selected the event is simply ignored:
+    // sessions can run with no animal involved, so this is expected and is not an error condition.
+    private async Task PersistToAnimalAsync(ApiEventKind kind, Func<string, Task> write)
+    {
+        var identifier = Animal?.Identifier;
+
+        if (string.IsNullOrWhiteSpace(identifier))
+        {
+            LogNoAnimalSelected(kind);
+            return;
+        }
+
+        try
+        {
+            await write(identifier);
+        }
+        catch (Exception ex)
+        {
+            LogPersistEventFailed(ex, kind, identifier);
+        }
+    }
+
+    // Uses the status's own animal rather than the Animal property: OnSystemStatusChanged has just set the
+    // selection from this very message, so the payload is the unambiguous source.
+    private async Task PersistReachStatusAsync(ApiSystemStatus status)
+    {
+        if (status.Animal is not { } animal || string.IsNullOrWhiteSpace(animal.Identifier))
+            return;
+
+        try
+        {
+            await _animalStore.AddReachStatusIfChangedAsync(
+                animal.Identifier, animal.ReachStatusTotal, animal.ReachStatusDay,
+                DayPath.TryGetDay(status.Project.DayPath));
+        }
+        catch (Exception ex)
+        {
+            LogPersistReachStatusFailed(ex, animal.Identifier);
+        }
+    }
+
+    // ApiEvent.When is a producer epoch-seconds timestamp; fall back to server time if it is unset.
+    private static DateTime ToUtc(double epochSeconds) =>
+        epochSeconds > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(epochSeconds * 1000)).UtcDateTime
+            : DateTime.UtcNow;
+
     private void OnAnimalChanged(ApiAnimalStatus? status)
     {
         if (status is { } s)
@@ -550,14 +724,24 @@ public partial class AutotrainerDevice
     [LoggerMessage(Level = LogLevel.Debug, Message = "Event: {evet}")]
     private partial void LogEvent(ApiEventKind evet);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Failed to deserialize the {kind} payload as {payloadType}; event handled with no payload.")]
+    private partial void LogPayloadDeserializeFailed(Exception ex, ApiEventKind kind, string payloadType);
+
     [LoggerMessage(Level = LogLevel.Warning, Message = "{kind} received with no animal identifier; skipping database select/create.")]
     private partial void LogMissingAnimalIdentifier(ApiEventKind kind);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist animal info for {identifier}")]
     private partial void LogPersistAnimalFailed(Exception ex, string identifier);
 
-    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist reach events for {identifier}")]
-    private partial void LogPersistReachEventsFailed(Exception ex, string identifier);
+    // Not a warning: an event arriving with no animal selected is normal and is simply not stored.
+    [LoggerMessage(Level = LogLevel.Debug, Message = "{kind} received with no animal selected; not stored.")]
+    private partial void LogNoAnimalSelected(ApiEventKind kind);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist {kind} for {identifier}")]
+    private partial void LogPersistEventFailed(Exception ex, ApiEventKind kind, string identifier);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist reach status for {identifier}")]
+    private partial void LogPersistReachStatusFailed(Exception ex, string identifier);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Command response {command} {result}")]
     private partial void LogCommandResponse(ApiCommandKind command, ApiCommandRequestResult result);
