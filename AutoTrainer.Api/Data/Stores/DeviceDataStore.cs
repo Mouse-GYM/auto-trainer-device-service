@@ -9,6 +9,8 @@ public interface IDeviceDataStore
     Task AddSystemConfigurationAsync(ApiSystemConfiguration config, CancellationToken ct = default);
     Task AddAlarmHistoryAsync(ApiAlarmStatus status, CancellationToken ct = default);
     Task AddDetectorHistoryAsync(ApiDetectorStatus status, CancellationToken ct = default);
+    Task<IReadOnlyList<Entities.AlarmHistory>> GetAlarmHistoryAsync(DateTime since, CancellationToken ct = default);
+    Task<IReadOnlyList<Entities.DetectorHistory>> GetDetectorHistoryAsync(DateTime since, CancellationToken ct = default);
 }
 
 public partial class DeviceDataStore(
@@ -78,5 +80,27 @@ public partial class DeviceDataStore(
         });
 
         await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<Entities.AlarmHistory>> GetAlarmHistoryAsync(DateTime since, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        return await db.AlarmHistory
+            .AsNoTracking()
+            .Where(a => a.CreatedAt >= since)
+            .OrderByDescending(a => a.CreatedAt)
+            .ToListAsync(ct);
+    }
+
+    public async Task<IReadOnlyList<Entities.DetectorHistory>> GetDetectorHistoryAsync(DateTime since, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        return await db.DetectorHistory
+            .AsNoTracking()
+            .Where(d => d.CreatedAt >= since)
+            .OrderByDescending(d => d.CreatedAt)
+            .ToListAsync(ct);
     }
 }

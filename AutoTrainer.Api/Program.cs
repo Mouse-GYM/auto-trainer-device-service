@@ -1,5 +1,6 @@
 using AutoTrainer.Api.CommandQueue;
 using AutoTrainer.Api.Data;
+using AutoTrainer.Api.Endpoints;
 using AutoTrainer.Api.Data.Stores;
 using AutoTrainer.Api.Emergency;
 using AutoTrainer.Api.Hub;
@@ -102,37 +103,7 @@ app.Use(async (context, next) =>
 
 app.UseCors();
 
-app.MapGet("/device", (AutotrainerDevice device) => device);
-
-app.MapGet("/device/cage/latest", (AutotrainerDevice device) =>
-{
-    if (string.IsNullOrEmpty(device.LatestWebImage) || !File.Exists(device.LatestWebImage))
-        return Results.NotFound();
-
-    var fullPath = Path.GetFullPath(device.LatestWebImage);
-
-    if (!fullPath.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
-        return Results.NotFound();
-
-    const int maxWidth = 480;
-
-    using var original = SKBitmap.Decode(fullPath);
-
-    if (original is null)
-        return Results.StatusCode(500);
-
-    if (original.Width <= maxWidth)
-        return Results.File(fullPath, "image/png");
-
-    float scale = (float)maxWidth / original.Width;
-    int newHeight = (int)(original.Height * scale);
-
-    using var resized = original.Resize(new SKImageInfo(maxWidth, newHeight), new SKSamplingOptions(SKFilterMode.Linear));
-    using var image = SKImage.FromBitmap(resized);
-    var data = image.Encode(SKEncodedImageFormat.Jpeg, 80);
-
-    return Results.Bytes(data.ToArray(), "image/jpeg");
-});
+app.MapDeviceEndpoints();
 
 app.MapHub<MessageHub>("/messages");
 
