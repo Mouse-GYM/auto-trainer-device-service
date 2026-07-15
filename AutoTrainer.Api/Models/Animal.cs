@@ -47,6 +47,10 @@ public class Animal
 
     public ReachStatus ReachStatusDay { get; } = new();
 
+    // Rolling total of the last 5 calendar days from the ReachStatusDay table. Computed server-side (never in a
+    // zeromq message), so it is populated/maintained outside ApplyStatus and left untouched here.
+    public ReachStatus ReachStatus5Day { get; } = new();
+
     public void ApplyStatus(ApiAnimalStatus status)
     {
         Identifier = status.Identifier;

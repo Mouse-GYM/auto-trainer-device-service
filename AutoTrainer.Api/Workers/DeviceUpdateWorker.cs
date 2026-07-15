@@ -8,16 +8,23 @@ public partial class DeviceUpdateWorker(AutotrainerDevice device, ILogger<Device
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        await foreach (var action in device.UpdateReader.ReadAllAsync(stoppingToken))
+        try
         {
-            try
+            await foreach (var action in device.UpdateReader.ReadAllAsync(stoppingToken))
             {
-                await action();
+                try
+                {
+                    await action();
+                }
+                catch (Exception ex)
+                {
+                    LogUpdateError(ex);
+                }
             }
-            catch (Exception ex)
-            {
-                LogUpdateError(ex);
-            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal shutdown: ReadAllAsync observed the stopping token.
         }
 
         LogExiting(DateTimeOffset.Now);

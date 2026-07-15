@@ -104,6 +104,9 @@ app.Use(async (context, next) =>
 app.UseCors();
 
 app.MapDeviceEndpoints();
+app.MapReachEndpoints();
+app.MapSessionEndpoints();
+app.MapAnimalEndpoints();
 
 app.MapHub<MessageHub>("/messages");
 

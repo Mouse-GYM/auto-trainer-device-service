@@ -15,20 +15,27 @@ public partial class ServiceHeartbeatWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            var heartbeat = new ApiHeartBeat
+            while (!stoppingToken.IsCancellationRequested)
             {
-                Identifier = "autotrainer-device-service",
-                Version = "1",
-                Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-            };
+                var heartbeat = new ApiHeartBeat
+                {
+                    Identifier = "autotrainer-device-service",
+                    Version = "1",
+                    Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
+                };
 
-            await _hubContext.Clients.All.ServiceHeartbeat(heartbeat);
+                await _hubContext.Clients.All.ServiceHeartbeat(heartbeat);
 
-            LogHeartbeatSent();
+                LogHeartbeatSent();
 
-            await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal shutdown: the stopping token cancelled the delay.
         }
     }
 

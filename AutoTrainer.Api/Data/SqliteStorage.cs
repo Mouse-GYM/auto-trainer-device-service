@@ -14,6 +14,10 @@ public interface ISqliteStorage
     string GetAnimalDatabasePath(string identifier);
     string GetAnimalConnectionString(string identifier);
 
+    // True when this animal's per-animal database file already exists. Used by read endpoints to tell an
+    // unknown animal (404) from a valid-but-not-yet-created one, without opening the database.
+    bool AnimalDatabaseExists(string identifier);
+
     bool EnsureDirectories(out string? error);
 }
 
@@ -57,6 +61,8 @@ public class SqliteStorage : ISqliteStorage
 
     public string GetAnimalConnectionString(string identifier) =>
         new SqliteConnectionStringBuilder { DataSource = GetAnimalDatabasePath(identifier) }.ConnectionString;
+
+    public bool AnimalDatabaseExists(string identifier) => File.Exists(GetAnimalDatabasePath(identifier));
 
     public bool EnsureDirectories(out string? error)
     {

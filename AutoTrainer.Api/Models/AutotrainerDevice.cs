@@ -24,6 +24,26 @@ public partial class AutotrainerDevice
 
     private DateTime _lastWebImageBroadcast = DateTime.MinValue;
 
+    // Running 5-day reach-status total for the selected animal (surfaced as Animal.ReachStatus5Day). Seeded from
+    // the day table on selection and re-seeded on a DayPath day rollover; the current day's counts are updated in
+    // memory from reach-status events. _fiveDayId is the animal the running total currently belongs to.
+    private FiveDayReachStatus _fiveDay;
+    private string? _fiveDayId;
+
+    // Day attribution for day*CountChanged events (which carry no day). The attribution day is the newer of the
+    // most recent systemStatus DayPath day and the most recent DayStarted day, so a new day's counts are recorded
+    // against the new day even before the next systemStatus arrives. Unlike the 5-day total (DayPath only), this
+    // must respect DayStarted: a mis-attributed per-day row is persisted and never corrected.
+    private DateOnly? _lastDayPathDay;
+    private DateOnly? _lastDayStartedDay;
+
+    // The device's current day: the newer of the most recent systemStatus DayPath day and DayStarted day. Null
+    // until either is seen. Drives day*CountChanged attribution and the /animal/reachstatus day portion.
+    public DateOnly? CurrentDeviceDay =>
+        _lastDayPathDay is { } p
+            ? (_lastDayStartedDay is { } s && s > p ? s : p)
+            : _lastDayStartedDay;
+
     public AutotrainerDevice(ICommandTaskQueue commandQueue, IHubContext<MessageHub, IMessageHub> hubContext, ILogger<AutotrainerDevice> logger, IDeviceDataStore deviceStore, IAnimalDataStore animalStore)
     {
         _commandQueue = commandQueue;
@@ -170,9 +190,33 @@ public partial class AutotrainerDevice
                 case ApiEventKind.SessionEnded:
                     {
                         if (payload is ApiSessionEndedPayload ctx)
-                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplySessionEndedAsync(
-                                id, ctx.SessionId, ToUtc(apiEvent.When),
-                                ctx.CaptureTrialCount, ctx.AnalysisTrialCount, ctx.FailedTrialCount));
+                        {
+                            var id = Animal?.Identifier;
+                            if (string.IsNullOrWhiteSpace(id))
+                            {
+                                LogNoAnimalSelected(apiEvent.Kind);
+                            }
+                            else
+                            {
+                                try
+                                {
+                                    var summary = await _animalStore.ApplySessionEndedAsync(id, ctx.SessionId,
+                                        ToUtc(apiEvent.When), ctx.CaptureTrialCount, ctx.AnalysisTrialCount,
+                                        ctx.FailedTrialCount);
+                                    if (summary is not null)
+                                    {
+                                        // 24h count = the rolling window (the "d" unit), recomputed as of now.
+                                        var count = await _animalStore.CountSessionsAsync(id,
+                                            DateTime.UtcNow - TimeSpan.FromDays(1), isAnalysisDeferred: null);
+                                        await _hubContext.Clients.All.SessionEnded(new SessionEnded(summary, count));
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    LogPersistEventFailed(ex, apiEvent.Kind, id);
+                                }
+                            }
+                        }
                         break;
                     }
                 case ApiEventKind.BatchAnalysisStarted:
@@ -332,9 +376,43 @@ public partial class AutotrainerDevice
                     {
                         if (payload is ApiSystemStatus ctx)
                         {
-                            OnSystemStatusChanged(ctx);
+                            await OnSystemStatusChangedAsync(ctx);
 
                             await PersistReachStatusAsync(ctx);
+                        }
+                        break;
+                    }
+                case ApiEventKind.DayStarted:
+                    {
+                        // DayStarted does NOT move the 5-day window (that follows the authoritative DayPath only).
+                        // It does set the day-attribution clock: its epoch, read in the device's local timezone (the
+                        // producer's), tells us a new day has begun so day*CountChanged events land on the new day
+                        // even before the next systemStatus. The 5-day total self-corrects on that next systemStatus.
+                        if (payload is ApiDayStartedPayload started)
+                            _lastDayStartedDay = LocalDateFromEpoch(started.Date);
+                        break;
+                    }
+                case ApiEventKind.PelletPresentedCountChanged:
+                case ApiEventKind.PelletConsumedCountChanged:
+                case ApiEventKind.ReachCountChanged:
+                case ApiEventKind.SuccessfulReachesCountChanged:
+                case ApiEventKind.DayPelletPresentedCountChanged:
+                case ApiEventKind.DayPelletConsumedCountChanged:
+                case ApiEventKind.DayReachCountChanged:
+                case ApiEventKind.DaySuccessfulReachesCountChanged:
+                    {
+                        // Each event is the new absolute Count for one column of the total or day reach-status
+                        // table (the Change field is ignored). Same destination tables as a systemStatus snapshot,
+                        // one column at a time.
+                        if (payload is ApiCountChangePayload ctx)
+                        {
+                            var (scope, field) = ReachCountTarget(apiEvent.Kind);
+
+                            OnReachCountChanged(scope, field, ctx.Count);
+
+                            var attributionDay = CurrentDeviceDay;
+                            await PersistToAnimalAsync(apiEvent.Kind, id =>
+                                _animalStore.ApplyReachCountChangeAsync(id, scope, field, ctx.Count, attributionDay));
                         }
                         break;
                     }
@@ -349,6 +427,10 @@ public partial class AutotrainerDevice
                             }
                             else
                             {
+                                // Seed the running 5-day total for the (possibly new) animal before broadcasting,
+                                // so the single AnimalChanged below already carries ReachStatus5Day.
+                                await RefreshFiveDayAsync(status.Identifier, day: null, currentDayCounts: null);
+
                                 // The selection drives which animal database every lifecycle event is written
                                 // to, so apply it here rather than waiting for the next systemStatus.
                                 OnAnimalChanged(status);
@@ -429,7 +511,7 @@ public partial class AutotrainerDevice
                         var status = DeserializeData<ApiSystemStatus>(response.Data);
                         if (status != null)
                         {
-                            OnSystemStatusChanged(status);
+                            await OnSystemStatusChangedAsync(status);
                         }
                         break;
                     }
@@ -587,6 +669,21 @@ public partial class AutotrainerDevice
     private Task ApplyTrialEventAsync(ApiEvent apiEvent, TrialEventValues values) =>
         PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ApplyTrialEventAsync(id, apiEvent.Kind, values));
 
+    // Maps each *CountChanged event to the reach-status table (Total vs Day) and column it updates. The Day
+    // events are the same four columns in the day table.
+    private static (ReachCountScope Scope, ReachCountField Field) ReachCountTarget(ApiEventKind kind) => kind switch
+    {
+        ApiEventKind.PelletPresentedCountChanged => (ReachCountScope.Total, ReachCountField.PelletsPresented),
+        ApiEventKind.PelletConsumedCountChanged => (ReachCountScope.Total, ReachCountField.PelletsConsumed),
+        ApiEventKind.ReachCountChanged => (ReachCountScope.Total, ReachCountField.Reaches),
+        ApiEventKind.SuccessfulReachesCountChanged => (ReachCountScope.Total, ReachCountField.SuccessfulReaches),
+        ApiEventKind.DayPelletPresentedCountChanged => (ReachCountScope.Day, ReachCountField.PelletsPresented),
+        ApiEventKind.DayPelletConsumedCountChanged => (ReachCountScope.Day, ReachCountField.PelletsConsumed),
+        ApiEventKind.DayReachCountChanged => (ReachCountScope.Day, ReachCountField.Reaches),
+        ApiEventKind.DaySuccessfulReachesCountChanged => (ReachCountScope.Day, ReachCountField.SuccessfulReaches),
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Not a reach-count-change event kind.")
+    };
+
     // Every animal-database write goes through here. If no animal is selected the event is simply ignored:
     // sessions can run with no animal involved, so this is expected and is not an error condition.
     private async Task PersistToAnimalAsync(ApiEventKind kind, Func<string, Task> write)
@@ -645,10 +742,97 @@ public partial class AutotrainerDevice
         else
         {
             Animal = null;
+            _fiveDay = default;
+            _fiveDayId = null;
         }
 
+        StampAndBroadcastAnimal();
+    }
+
+    // Stamps the current running 5-day total onto the live Animal (ReachStatus5Day is computed, not part of any
+    // message) and broadcasts it. Every animal broadcast goes through here so ReachStatus5Day is always fresh.
+    private void StampAndBroadcastAnimal()
+    {
+        Animal?.ReachStatus5Day.ApplyStatus(_fiveDay.Total);
         _hubContext.Clients.All.AnimalChanged(Animal);
     }
+
+    // Applies a single-column *CountChanged event to the live Animal, keeping it current between the periodic
+    // systemStatus snapshots that otherwise refresh it. No-ops when no animal is selected (nothing to update),
+    // mirroring the database write.
+    private void OnReachCountChanged(ReachCountScope scope, ReachCountField field, int count)
+    {
+        if (Animal is not { } animal)
+            return;
+
+        var target = scope == ReachCountScope.Total ? animal.ReachStatusTotal : animal.ReachStatusDay;
+        switch (field)
+        {
+            case ReachCountField.PelletsPresented: target.PelletsPresented = count; break;
+            case ReachCountField.PelletsConsumed: target.PelletsConsumed = count; break;
+            case ReachCountField.Reaches: target.Reaches = count; break;
+            case ReachCountField.SuccessfulReaches: target.SuccessfulReaches = count; break;
+        }
+
+        // A day-scope change moves today's contribution to the running 5-day total (in memory — no rollover, so
+        // no database read). Patch the one column on the DB-seeded current-day counts (not on animal.ReachStatusDay,
+        // whose other columns are only current as of the last systemStatus). Total-scope changes don't affect it.
+        if (scope == ReachCountScope.Day)
+            _fiveDay = _fiveDay with { CurrentDayCounts = WithCount(_fiveDay.CurrentDayCounts, field, count) };
+
+        StampAndBroadcastAnimal();
+    }
+
+    // Brings _fiveDay up to date for `identifier`. A database read (reseed of the earlier-four-days base) happens
+    // only when the animal changes or the DayPath day rolls over; otherwise the current day's counts are just
+    // replaced in memory. `day` is the authoritative DayPath day (null when unknown, e.g. a count event or a bare
+    // re-evaluation); `currentDayCounts`, when given, is the day table's latest counts to apply.
+    private async Task RefreshFiveDayAsync(string? identifier, DateOnly? day, ApiReachStatus? currentDayCounts)
+    {
+        if (string.IsNullOrWhiteSpace(identifier))
+        {
+            _fiveDay = default;
+            _fiveDayId = null;
+            return;
+        }
+
+        if (identifier != _fiveDayId || (day is { } d && d != _fiveDay.CurrentDay))
+        {
+            try
+            {
+                _fiveDay = await _animalStore.LoadFiveDayReachStatusAsync(identifier, day);
+            }
+            catch (Exception ex)
+            {
+                // Reset to an empty window (not the previous animal's sums) so a failed seed can't leak another
+                // animal's totals; the next systemStatus will reseed.
+                LogFiveDayLoadFailed(ex, identifier);
+                _fiveDay = new FiveDayReachStatus(day, default, default);
+            }
+
+            _fiveDayId = identifier;
+        }
+
+        if (currentDayCounts is { } counts)
+            _fiveDay = _fiveDay with { CurrentDay = _fiveDay.CurrentDay ?? day, CurrentDayCounts = counts };
+    }
+
+    // Sets a single column, mirroring the store's per-column carry-forward so the in-memory 5-day current-day
+    // counts stay identical to the row the store appends for the same event.
+    private static ApiReachStatus WithCount(ApiReachStatus s, ReachCountField field, int count) => field switch
+    {
+        ReachCountField.PelletsPresented => s with { PelletsPresented = count },
+        ReachCountField.PelletsConsumed => s with { PelletsConsumed = count },
+        ReachCountField.Reaches => s with { Reaches = count },
+        ReachCountField.SuccessfulReaches => s with { SuccessfulReaches = count },
+        _ => s
+    };
+
+    // DayStarted.Date is epoch seconds for the producer's local midnight; the device runs in the producer's
+    // timezone, so the local-time calendar date matches the DayPath date (which the UTC date can miss by a day).
+    private static DateOnly LocalDateFromEpoch(double epochSeconds) =>
+        DateOnly.FromDateTime(
+            DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(epochSeconds * 1000)).LocalDateTime);
 
     private void OnAlarmsChanged(List<ApiAlarmStatus> statuses)
     {
@@ -687,10 +871,21 @@ public partial class AutotrainerDevice
         _hubContext.Clients.All.SystemConfigurationChanged(config);
     }
 
-    private void OnSystemStatusChanged(ApiSystemStatus status)
+    private async Task OnSystemStatusChangedAsync(ApiSystemStatus status)
     {
         OnApplicationModeChanged(status.ApplicationMode);
         OnTrainingModeChanged(status.TrainingMode);
+
+        // DayPath is the authoritative day for both the 5-day window and (as one input) day attribution.
+        var dayPathDay = DayPath.TryGetDay(status.Project.DayPath);
+        if (dayPathDay is not null)
+            _lastDayPathDay = dayPathDay;
+
+        // Refresh the running 5-day total before the animal is broadcast (in OnAnimalChanged) so ReachStatus5Day
+        // rides along fresh. A change to the DayPath day rolls the window here.
+        await RefreshFiveDayAsync(status.Animal?.Identifier, dayPathDay,
+            status.Animal is { } a ? a.ReachStatusDay : null);
+
         OnAnimalChanged(status.Animal);
         OnAlarmsChanged(status.Alarms);
         OnDetectorsChanged(status.Detectors);
@@ -742,6 +937,9 @@ public partial class AutotrainerDevice
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist reach status for {identifier}")]
     private partial void LogPersistReachStatusFailed(Exception ex, string identifier);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to load 5-day reach status for {identifier}")]
+    private partial void LogFiveDayLoadFailed(Exception ex, string identifier);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Command response {command} {result}")]
     private partial void LogCommandResponse(ApiCommandKind command, ApiCommandRequestResult result);

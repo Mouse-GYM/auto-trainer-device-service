@@ -27,4 +27,9 @@
     <PackageReference Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="3.119.2" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Lets AutoTrainer.Api.Tests exercise internal endpoint handlers and helpers directly. -->
+    <InternalsVisibleTo Include="AutoTrainer.Api.Tests" />
+  </ItemGroup>
+
 </Project>

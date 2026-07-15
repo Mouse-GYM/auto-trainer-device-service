@@ -1,3 +1,4 @@
+using AutoTrainer.Api.ApiTypes;
 using AutoTrainer.Api.Data.Stores;
 using AutoTrainer.Api.Models;
 
@@ -7,51 +8,58 @@ public static class DeviceEndpoints
 {
     public static IEndpointRouteBuilder MapDeviceEndpoints(this IEndpointRouteBuilder app)
     {
-        var device = app.MapGroup("/device");
+        var device = app.MapGroup("/device").LogRequestsInDevelopment(app).LogClientDisconnects();
 
         device.MapGet("", (AutotrainerDevice device) => device);
         device.MapGet("/cage/latest", GetLatestCageImage);
-        device.MapGet("/alarms", GetAlarmHistory);
-        device.MapGet("/detectors", GetDetectorHistory);
-        device.MapGet("/reaches", GetReachEventHistory);
+        device.MapGet("/alarms", GetAlarms);
+        device.MapGet("/detectors", GetDetectors);
+        device.MapGet("/events", GetApiEventHistory);
 
         return app;
     }
 
-    private static async Task<IResult> GetAlarmHistory(string? within, IDeviceDataStore store, CancellationToken ct)
+    internal static async Task<IResult> GetAlarms(string? within, string[]? alarmId, int? page, int? pageSize,
+        IDeviceDataStore store, CancellationToken ct)
     {
         if (!TimeWindow.TryParse(within, out var window))
-            return Results.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
+            return TypedResults.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
 
-        var rows = await store.GetAlarmHistoryAsync(DateTime.UtcNow - window, ct);
+        if (!EnumFilter.TryParse<ApiAlarmKind>(alarmId, out var alarmIds, out var err))
+            return TypedResults.BadRequest(err);
 
-        return Results.Ok(rows);
+        var pr = PageRequest.From(page, pageSize);
+        var result = await store.GetAlarmsAsync(window.StartUtc(DateTime.UtcNow), [.. alarmIds], pr, ct);
+        return TypedResults.Ok(result);
     }
 
-    private static async Task<IResult> GetDetectorHistory(string? within, IDeviceDataStore store, CancellationToken ct)
+    internal static async Task<IResult> GetDetectors(string? within, string[]? detectorId, int? page, int? pageSize,
+        IDeviceDataStore store, CancellationToken ct)
     {
         if (!TimeWindow.TryParse(within, out var window))
-            return Results.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
+            return TypedResults.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
 
-        var rows = await store.GetDetectorHistoryAsync(DateTime.UtcNow - window, ct);
+        if (!EnumFilter.TryParse<ApiDetectorKind>(detectorId, out var detectorIds, out var err))
+            return TypedResults.BadRequest(err);
 
-        return Results.Ok(rows);
+        var pr = PageRequest.From(page, pageSize);
+        var result = await store.GetDetectorsAsync(window.StartUtc(DateTime.UtcNow), [.. detectorIds], pr, ct);
+        return TypedResults.Ok(result);
     }
 
-    private static async Task<IResult> GetReachEventHistory(string? within, string? animal, AutotrainerDevice device, IAnimalDataStore store, CancellationToken ct)
+    // The request contract exists; the backing store does not yet — ApiEvents are not persisted. Persisting
+    // them (device-level vs per-animal, table shape) is a separate future task, so the data step returns 404.
+    // The full request is still parsed and validated so the contract is exercised and documented.
+    internal static IResult GetApiEventHistory(string? within, string[]? kind, int? page, int? pageSize)
     {
-        if (!TimeWindow.TryParse(within, out var window))
-            return Results.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
+        if (!TimeWindow.TryParse(within, out _))
+            return TypedResults.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
 
-        // Reach history lives in the per-animal database. Use the requested animal, otherwise the selected one.
-        var identifier = !string.IsNullOrWhiteSpace(animal) ? animal : device.Animal?.Identifier;
+        if (!EnumFilter.TryParse<ApiEventKind>(kind, out _, out var err))
+            return TypedResults.BadRequest(err);
 
-        if (string.IsNullOrWhiteSpace(identifier))
-            return Results.BadRequest("No animal specified and no animal is currently selected.");
-
-        var rows = await store.GetReachEventHistoryAsync(identifier, DateTime.UtcNow - window, ct);
-
-        return Results.Ok(rows);
+        _ = PageRequest.From(page, pageSize);
+        return TypedResults.NotFound("ApiEvent history is not yet persisted.");
     }
 
     private static IResult GetLatestCageImage(AutotrainerDevice device)

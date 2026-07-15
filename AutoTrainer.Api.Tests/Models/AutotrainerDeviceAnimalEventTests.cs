@@ -1,9 +1,12 @@
 using System.Text.Json;
 using AutoTrainer.Api.ApiTypes;
 using AutoTrainer.Api.CommandQueue;
+using AutoTrainer.Api.Contracts;
 using AutoTrainer.Api.Data.Stores;
+using AutoTrainer.Api.Endpoints;
 using AutoTrainer.Api.Hub;
 using AutoTrainer.Api.Models;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
@@ -146,6 +149,28 @@ public class AutotrainerDeviceAnimalEventTests
 
         animalStore.Verify(s => s.ApplySessionEndedAsync(
             "mouse-1", SessionA, It.IsAny<DateTime>(), 5, 4, 1, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task SessionEnded_BroadcastsSummaryAndSessionCount()
+    {
+        var (device, _, clients, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+
+        var summary = new SessionSummaryDto(SessionA, null, null, false, 5, 4, 1);
+        animalStore.Setup(s => s.ApplySessionEndedAsync("mouse-1", SessionA, It.IsAny<DateTime>(),
+                5, 4, 1, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(summary);
+        animalStore.Setup(s => s.CountSessionsAsync("mouse-1", It.IsAny<DateTime?>(), null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(7);
+
+        device.OnApiEvent(Event(ApiEventKind.SessionEnded, new ApiSessionEndedPayload
+        {
+            SessionId = SessionA, CaptureTrialCount = 5, AnalysisTrialCount = 4, FailedTrialCount = 1
+        }));
+        await DrainAsync(device);
+
+        clients.Verify(c => c.SessionEnded(new SessionEnded(summary, 7)), Times.Once);
     }
 
     [Fact]
@@ -303,6 +328,241 @@ public class AutotrainerDeviceAnimalEventTests
             It.Is<ApiReachStatus>(r => r.PelletsPresented == 10),
             It.Is<ApiReachStatus>(r => r.PelletsPresented == 3),
             new DateOnly(2026, 7, 13),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Theory]
+    [InlineData(ApiEventKind.PelletPresentedCountChanged, ReachCountScope.Total, ReachCountField.PelletsPresented)]
+    [InlineData(ApiEventKind.PelletConsumedCountChanged, ReachCountScope.Total, ReachCountField.PelletsConsumed)]
+    [InlineData(ApiEventKind.ReachCountChanged, ReachCountScope.Total, ReachCountField.Reaches)]
+    [InlineData(ApiEventKind.SuccessfulReachesCountChanged, ReachCountScope.Total, ReachCountField.SuccessfulReaches)]
+    [InlineData(ApiEventKind.DayPelletPresentedCountChanged, ReachCountScope.Day, ReachCountField.PelletsPresented)]
+    [InlineData(ApiEventKind.DayPelletConsumedCountChanged, ReachCountScope.Day, ReachCountField.PelletsConsumed)]
+    [InlineData(ApiEventKind.DayReachCountChanged, ReachCountScope.Day, ReachCountField.Reaches)]
+    [InlineData(ApiEventKind.DaySuccessfulReachesCountChanged, ReachCountScope.Day, ReachCountField.SuccessfulReaches)]
+    public async Task CountChanged_RoutesToScopeAndColumn_UsingCount(ApiEventKind kind, ReachCountScope scope,
+        ReachCountField field)
+    {
+        var (device, _, clients, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+        clients.Invocations.Clear();   // drop the AnimalChanged broadcast from selection
+
+        // Change is deliberately different from Count to prove Count (the absolute value) is what's forwarded.
+        device.OnApiEvent(Event(kind, new ApiCountChangePayload { Change = 1, Count = 42 }));
+        await DrainAsync(device);
+
+        animalStore.Verify(s => s.ApplyReachCountChangeAsync(
+            "mouse-1", scope, field, 42, It.IsAny<DateOnly?>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        // The live Animal model is updated between systemStatus messages, and the change is broadcast. (The
+        // Animal is a single mutated reference, so assert its state directly rather than via the captured arg.)
+        var live = scope == ReachCountScope.Total ? device.Animal!.ReachStatusTotal : device.Animal!.ReachStatusDay;
+        Assert.Equal(42, Column(live, field));
+        clients.Verify(c => c.AnimalChanged(It.IsAny<Animal>()), Times.Once);
+    }
+
+    private static double Column(ReachStatus s, ReachCountField field) => field switch
+    {
+        ReachCountField.PelletsPresented => s.PelletsPresented,
+        ReachCountField.PelletsConsumed => s.PelletsConsumed,
+        ReachCountField.Reaches => s.Reaches,
+        ReachCountField.SuccessfulReaches => s.SuccessfulReaches,
+        _ => double.NaN
+    };
+
+    [Fact]
+    public async Task AnimalSelected_SeedsFiveDayReachStatusFromStore()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        animalStore.Setup(s => s.LoadFiveDayReachStatusAsync("mouse-1", null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FiveDayReachStatus(new DateOnly(2026, 7, 15),
+                new ApiReachStatus { PelletsConsumed = 10 },   // prior four days
+                new ApiReachStatus { PelletsConsumed = 3 }));  // current day
+
+        await SelectAnimalAsync(device);
+
+        Assert.Equal(13, device.Animal!.ReachStatus5Day.PelletsConsumed);   // 10 + 3
+    }
+
+    [Fact]
+    public async Task DayCountChanged_UpdatesFiveDayRunningTotal_OnTopOfSeededPriorDays()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        animalStore.Setup(s => s.LoadFiveDayReachStatusAsync("mouse-1", null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FiveDayReachStatus(new DateOnly(2026, 7, 15),
+                new ApiReachStatus { PelletsConsumed = 10 },
+                new ApiReachStatus { PelletsConsumed = 3 }));
+        await SelectAnimalAsync(device);
+
+        // Day consumed count is now 8; the running total = 10 (prior four) + 8 (new current day).
+        device.OnApiEvent(Event(ApiEventKind.DayPelletConsumedCountChanged, new ApiCountChangePayload { Count = 8 }));
+        await DrainAsync(device);
+
+        Assert.Equal(18, device.Animal!.ReachStatus5Day.PelletsConsumed);
+    }
+
+    [Fact]
+    public async Task TotalCountChanged_DoesNotAffectFiveDay()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        animalStore.Setup(s => s.LoadFiveDayReachStatusAsync("mouse-1", null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FiveDayReachStatus(new DateOnly(2026, 7, 15),
+                new ApiReachStatus { PelletsConsumed = 10 }, new ApiReachStatus { PelletsConsumed = 3 }));
+        await SelectAnimalAsync(device);
+
+        device.OnApiEvent(Event(ApiEventKind.PelletConsumedCountChanged, new ApiCountChangePayload { Count = 999 }));
+        await DrainAsync(device);
+
+        Assert.Equal(13, device.Animal!.ReachStatus5Day.PelletsConsumed);   // unchanged by a total-scope event
+    }
+
+    [Fact]
+    public async Task SystemStatus_DayRollover_ReseedsFiveDayFromNewDay()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        // Selection seeds day 15; the rollover to day 16 reseeds anchored at the new day (prior four only).
+        animalStore.Setup(s => s.LoadFiveDayReachStatusAsync("mouse-1", null, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FiveDayReachStatus(new DateOnly(2026, 7, 15),
+                new ApiReachStatus { PelletsConsumed = 10 }, new ApiReachStatus { PelletsConsumed = 20 }));
+        animalStore.Setup(s => s.LoadFiveDayReachStatusAsync("mouse-1", new DateOnly(2026, 7, 16),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new FiveDayReachStatus(new DateOnly(2026, 7, 16),
+                new ApiReachStatus { PelletsConsumed = 12 }, new ApiReachStatus()));   // prior four, new day zero
+        await SelectAnimalAsync(device);
+        Assert.Equal(30, device.Animal!.ReachStatus5Day.PelletsConsumed);   // 10 + 20 on day 15
+
+        device.OnApiEvent(Event(ApiEventKind.SystemStatus, new ApiSystemStatus
+        {
+            Animal = new ApiAnimalStatus { Identifier = "mouse-1" },   // new day has no consumed yet
+            Project = new ApiProjectStatus { DayPath = "/data/mouse-1/20260716" }
+        }));
+        await DrainAsync(device);
+
+        // Dropped day 11's 20-and-something; new day is zero -> total falls to the prior four (12).
+        Assert.Equal(12, device.Animal!.ReachStatus5Day.PelletsConsumed);
+    }
+
+    // DayStarted.Date is read in local time (production converts the same way), so this is timezone-independent.
+    private static DateOnly LocalDayOf(double epochSeconds) =>
+        DateOnly.FromDateTime(DateTimeOffset.FromUnixTimeMilliseconds((long)(epochSeconds * 1000)).LocalDateTime);
+
+    [Fact]
+    public async Task DayStarted_SetsAttributionDay_ForSubsequentDayCountChanged()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+
+        const double epoch = 1_781_000_000;   // whole seconds -> no rounding ambiguity
+        var startedDay = LocalDayOf(epoch);
+
+        device.OnApiEvent(Event(ApiEventKind.DayStarted, new ApiDayStartedPayload { Date = epoch }));
+        device.OnApiEvent(Event(ApiEventKind.DayReachCountChanged, new ApiCountChangePayload { Count = 7 }));
+        await DrainAsync(device);
+
+        animalStore.Verify(s => s.ApplyReachCountChangeAsync(
+            "mouse-1", ReachCountScope.Day, ReachCountField.Reaches, 7, startedDay, It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task DayCountChanged_Attribution_UsesNewerDayStarted_OverOlderDayPath()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+
+        const double epoch = 1_781_000_000;
+        var startedDay = LocalDayOf(epoch);
+        var olderDayPath = startedDay.AddDays(-1);
+
+        device.OnApiEvent(Event(ApiEventKind.DayStarted, new ApiDayStartedPayload { Date = epoch }));
+        device.OnApiEvent(Event(ApiEventKind.SystemStatus, new ApiSystemStatus
+        {
+            Animal = new ApiAnimalStatus { Identifier = "mouse-1" },
+            Project = new ApiProjectStatus { DayPath = $"/data/mouse-1/{olderDayPath:yyyyMMdd}" }
+        }));
+        device.OnApiEvent(Event(ApiEventKind.DayReachCountChanged, new ApiCountChangePayload { Count = 3 }));
+        await DrainAsync(device);
+
+        animalStore.Verify(s => s.ApplyReachCountChangeAsync(
+            "mouse-1", ReachCountScope.Day, ReachCountField.Reaches, 3, startedDay, It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task DayCountChanged_Attribution_UsesNewerDayPath_OverOlderDayStarted()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+
+        const double epoch = 1_781_000_000;
+        var startedDay = LocalDayOf(epoch);
+        var newerDayPath = startedDay.AddDays(1);
+
+        device.OnApiEvent(Event(ApiEventKind.DayStarted, new ApiDayStartedPayload { Date = epoch }));
+        device.OnApiEvent(Event(ApiEventKind.SystemStatus, new ApiSystemStatus
+        {
+            Animal = new ApiAnimalStatus { Identifier = "mouse-1" },
+            Project = new ApiProjectStatus { DayPath = $"/data/mouse-1/{newerDayPath:yyyyMMdd}" }
+        }));
+        device.OnApiEvent(Event(ApiEventKind.DayReachCountChanged, new ApiCountChangePayload { Count = 3 }));
+        await DrainAsync(device);
+
+        animalStore.Verify(s => s.ApplyReachCountChangeAsync(
+            "mouse-1", ReachCountScope.Day, ReachCountField.Reaches, 3, newerDayPath, It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task CurrentDeviceDay_IsNullUntilDayIsKnown_ThenTracksDayPath()
+    {
+        var (device, _, _, _, _) = Build();
+        Assert.Null(device.CurrentDeviceDay);   // no DayStarted / systemStatus yet
+
+        device.OnApiEvent(Event(ApiEventKind.SystemStatus, new ApiSystemStatus
+        {
+            Animal = new ApiAnimalStatus { Identifier = "mouse-1" },
+            Project = new ApiProjectStatus { DayPath = "/data/mouse-1/20260718" }
+        }));
+        await DrainAsync(device);
+
+        Assert.Equal(new DateOnly(2026, 7, 18), device.CurrentDeviceDay);
+    }
+
+    [Fact]
+    public async Task GetAnimalReachStatus_NoAnimalSelected_Returns404()
+    {
+        var (device, _, _, _, _) = Build();
+
+        var result = await AnimalEndpoints.GetAnimalReachStatus(
+            animal: null, device, store: null!, storage: null!, ct: CancellationToken.None);
+
+        Assert.IsType<NotFound>(result);
+    }
+
+    [Fact]
+    public async Task GetAnimalReachStatus_PassesCurrentDeviceDay_AndReturnsStoreResult()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        await SelectAnimalAsync(device);   // selects mouse-1
+        device.OnApiEvent(Event(ApiEventKind.SystemStatus, new ApiSystemStatus
+        {
+            Animal = new ApiAnimalStatus { Identifier = "mouse-1" },
+            Project = new ApiProjectStatus { DayPath = "/data/mouse-1/20260718" }
+        }));
+        await DrainAsync(device);
+
+        var expected = new AnimalReachStatusDto(
+            new ReachStatusSnapshotDto(10, 9, 8, 7, null),
+            new ReachStatusSnapshotDto(3, 2, 1, 0, new DateOnly(2026, 7, 18)));
+        animalStore.Setup(s => s.GetReachStatusAsync("mouse-1", new DateOnly(2026, 7, 18), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(expected);
+
+        var result = await AnimalEndpoints.GetAnimalReachStatus(
+            animal: null, device, animalStore.Object, storage: null!, ct: CancellationToken.None);
+
+        var ok = Assert.IsType<Ok<AnimalReachStatusDto>>(result);
+        Assert.Same(expected, ok.Value);
+        animalStore.Verify(s => s.GetReachStatusAsync("mouse-1", new DateOnly(2026, 7, 18),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 

@@ -55,6 +55,8 @@ public interface IMessageHub
 
     Task AnimalChanged(Animal? animal);
 
+    Task SessionEnded(SessionEnded session);
+
     Task SystemConfigurationChanged(ApiSystemConfiguration config);
 
     Task DeviceDataPath(string? path);

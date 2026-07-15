@@ -1,4 +1,6 @@
 using AutoTrainer.Api.ApiTypes;
+using AutoTrainer.Api.Contracts;
+using AutoTrainer.Api.Endpoints;
 using Entities = AutoTrainer.Api.Data.Entities;
 
 namespace AutoTrainer.Api.Data.Stores;
@@ -9,8 +11,16 @@ public interface IDeviceDataStore
     Task AddSystemConfigurationAsync(ApiSystemConfiguration config, CancellationToken ct = default);
     Task AddAlarmHistoryAsync(ApiAlarmStatus status, CancellationToken ct = default);
     Task AddDetectorHistoryAsync(ApiDetectorStatus status, CancellationToken ct = default);
-    Task<IReadOnlyList<Entities.AlarmHistory>> GetAlarmHistoryAsync(DateTime since, CancellationToken ct = default);
-    Task<IReadOnlyList<Entities.DetectorHistory>> GetDetectorHistoryAsync(DateTime since, CancellationToken ct = default);
+
+    // Paged, time-windowed, type-filtered reads for the REST query API. An empty alarmIds/detectorIds means
+    // "no type filter". Newest-first by observation time.
+    Task<PagedResult<AlarmDto>> GetAlarmsAsync(DateTime since, ApiAlarmKind[] alarmIds, PageRequest page,
+        CancellationToken ct = default);
+    Task<PagedResult<DetectorDto>> GetDetectorsAsync(DateTime since, ApiDetectorKind[] detectorIds, PageRequest page,
+        CancellationToken ct = default);
+
+    // The flat cross-animal registry list: a single indexed query on the device database, no per-animal files.
+    Task<IReadOnlyList<AnimalDto>> GetAnimalsAsync(CancellationToken ct = default);
 
     // Ensure the device-level registry has a row for this animal (created when its per-animal database is
     // first created). No-op if it is already registered; does not touch the name.
@@ -90,25 +100,55 @@ public partial class DeviceDataStore(
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task<IReadOnlyList<Entities.AlarmHistory>> GetAlarmHistoryAsync(DateTime since, CancellationToken ct = default)
+    public async Task<PagedResult<AlarmDto>> GetAlarmsAsync(DateTime since, ApiAlarmKind[] alarmIds,
+        PageRequest page, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
-        return await db.AlarmHistory
-            .AsNoTracking()
-            .Where(a => a.CreatedAt >= since)
-            .OrderByDescending(a => a.CreatedAt)
+        var q = db.AlarmHistory.AsNoTracking().Where(a => a.CreatedAt >= since);
+        if (alarmIds.Length > 0)
+            q = q.Where(a => alarmIds.Contains(a.AlarmId));   // filter on the canonical AlarmId
+
+        var total = await q.CountAsync(ct);
+
+        var items = await q
+            .OrderByDescending(a => a.CreatedAt).ThenByDescending(a => a.Id)
+            .Skip(page.Skip).Take(page.PageSize)
+            .Select(a => new AlarmDto(a.Id, a.CreatedAt, a.AlarmId, a.IsActive, a.IsEnabled,
+                a.IsAutoResumeEnabled, a.IsStopCondition))
             .ToListAsync(ct);
+
+        return new PagedResult<AlarmDto>(items, page.Page, page.PageSize, total);
     }
 
-    public async Task<IReadOnlyList<Entities.DetectorHistory>> GetDetectorHistoryAsync(DateTime since, CancellationToken ct = default)
+    public async Task<PagedResult<DetectorDto>> GetDetectorsAsync(DateTime since, ApiDetectorKind[] detectorIds,
+        PageRequest page, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
-        return await db.DetectorHistory
+        var q = db.DetectorHistory.AsNoTracking().Where(d => d.CreatedAt >= since);
+        if (detectorIds.Length > 0)
+            q = q.Where(d => detectorIds.Contains(d.DetectorId));
+
+        var total = await q.CountAsync(ct);
+
+        var items = await q
+            .OrderByDescending(d => d.CreatedAt).ThenByDescending(d => d.Id)
+            .Skip(page.Skip).Take(page.PageSize)
+            .Select(d => new DetectorDto(d.Id, d.CreatedAt, d.DetectorId, d.IsActive, d.IsEnabled))
+            .ToListAsync(ct);
+
+        return new PagedResult<DetectorDto>(items, page.Page, page.PageSize, total);
+    }
+
+    public async Task<IReadOnlyList<AnimalDto>> GetAnimalsAsync(CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        return await db.Animals
             .AsNoTracking()
-            .Where(d => d.CreatedAt >= since)
-            .OrderByDescending(d => d.CreatedAt)
+            .OrderBy(a => a.Name).ThenBy(a => a.Identifier)
+            .Select(a => new AnimalDto(a.Identifier, a.Name, a.CreatedAt, a.UpdatedAt))
             .ToListAsync(ct);
     }
 

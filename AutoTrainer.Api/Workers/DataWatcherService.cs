@@ -69,7 +69,14 @@ public partial class DataWatcherService(AutotrainerDevice device, ILogger<DataWa
 
                 waitCycle++;
 
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;   // shutting down; the check below returns out of the worker
+                }
             }
 
             if (stoppingToken.IsCancellationRequested)
@@ -100,9 +107,12 @@ public partial class DataWatcherService(AutotrainerDevice device, ILogger<DataWa
             {
                 await Task.Delay(Timeout.Infinite, reinitCts.Token);
             }
-            catch (OperationCanceledException) when (!stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                LogDataLocationChanged(device.Configuration.DataLocation);
+                // A reinit (data location changed) loops to rebuild the watcher; a shutdown (stopping token)
+                // lets the outer loop condition end the worker. Only the reinit case is worth logging.
+                if (!stoppingToken.IsCancellationRequested)
+                    LogDataLocationChanged(device.Configuration.DataLocation);
             }
             finally
             {
