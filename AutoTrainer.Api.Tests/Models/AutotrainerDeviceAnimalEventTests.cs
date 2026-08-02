@@ -170,7 +170,7 @@ public class AutotrainerDeviceAnimalEventTests
         }));
         await DrainAsync(device);
 
-        clients.Verify(c => c.SessionEnded(new SessionEnded(summary, 7)), Times.Once);
+        clients.Verify(c => c.SessionEnded(new SessionEnded("mouse-1", summary, 7)), Times.Once);
     }
 
     [Fact]

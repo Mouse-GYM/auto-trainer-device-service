@@ -208,7 +208,8 @@ public partial class AutotrainerDevice
                                         // 24h count = the rolling window (the "d" unit), recomputed as of now.
                                         var count = await _animalStore.CountSessionsAsync(id,
                                             DateTime.UtcNow - TimeSpan.FromDays(1), isAnalysisDeferred: null);
-                                        await _hubContext.Clients.All.SessionEnded(new SessionEnded(summary, count));
+                                        await _hubContext.Clients.All.SessionEnded(
+                                            new SessionEnded(Animal?.Identifier, summary, count));
                                     }
                                 }
                                 catch (Exception ex)
