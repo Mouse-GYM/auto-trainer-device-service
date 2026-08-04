@@ -425,7 +425,18 @@ public partial class AutotrainerDevice
                         // This event's payload is IsEnabledContext ("isEnabled"), not IsEngagedContext.
                         if (payload is ApiIsEnabledPayload ctx)
                         {
-                            Behavior.LoadCellEnabled = ctx.IsEnabled;
+                            Behavior.LoadCellTriggered = ctx.IsEnabled;
+                            await _hubContext.Clients.All.BehaviorChanged(Behavior);
+                        }
+                        break;
+                    }
+                case ApiEventKind.HeadFixationForceDetectorChanged:
+                    {
+                        // IsEnabledContext, like HeadfixLoadCellEnabledChanged. Distinct from
+                        // HeadbarPressureEngagedChanged, which carries IsEngagedContext and drives Analysis.
+                        if (payload is ApiIsEnabledPayload ctx)
+                        {
+                            Behavior.HeadbarPressureTriggered = ctx.IsEnabled;
                             await _hubContext.Clients.All.BehaviorChanged(Behavior);
                         }
                         break;
