@@ -14,6 +14,7 @@ public enum ApiDetectorKind
 
     LowFreeDiskSpace = 501,
     MainThreadFrozen = 511,
+    BoardUnexpectedReset = 521,
 
     PelletRefillCountExceeded = 601,
     CageCleaningRequired = 610,

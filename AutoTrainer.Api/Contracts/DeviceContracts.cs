@@ -1,5 +1,4 @@
 using AutoTrainer.Api.ApiTypes;
-using AutoTrainer.Api.Models;
 
 namespace AutoTrainer.Api.Contracts;
 
@@ -25,5 +24,5 @@ public sealed record DetectorDto(int Id, DateTime ObservedAt, ApiDetectorKind De
 // NotificationSentAt is null when no operator notification was delivered for this event: notifications are
 // not configured, the event never reached the notification path, or publishing failed.
 public sealed record EmergencyDto(int Id, DateTime OccurredAt, ApiEventKind Kind,
-    EmergencyStopReason? StopReasonId, EmergencyResumeReason? ResumeReasonId, string ReasonText,
+    ApiEmergencyStopReason? StopReasonId, ApiEmergencyResumeReason? ResumeReasonId, string ReasonText,
     IReadOnlyList<ApiAlarmKind>? ActiveAlarms, DateTime? NotificationSentAt);

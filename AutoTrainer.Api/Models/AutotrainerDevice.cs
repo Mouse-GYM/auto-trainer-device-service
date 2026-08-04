@@ -215,7 +215,7 @@ public partial class AutotrainerDevice
                     }
                 case ApiEventKind.EmergencyResume:
                     {
-                        if (payload is ApiReasonPayload ctx)
+                        if (payload is ApiEmergencyResumePayload ctx)
                         {
                             var key = (apiEvent.Kind, (long)apiEvent.Index);
 

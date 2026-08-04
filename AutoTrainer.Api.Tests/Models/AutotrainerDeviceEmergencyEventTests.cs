@@ -74,11 +74,11 @@ public class AutotrainerDeviceEmergencyEventTests
         var (device, _, store) = Build();
 
         device.OnApiEvent(Event(ApiEventKind.EmergencyResume,
-            new ApiReasonPayload { Reason = "alarm-monitor-resumed" }, index: 7));
+            new ApiEmergencyResumePayload { Reason = "alarm-monitor-resumed" }, index: 7));
         await DrainAsync(device);
 
         store.Verify(s => s.AddEmergencyResumeAsync(
-            It.Is<ApiReasonPayload>(p => p.Reason == "alarm-monitor-resumed"),
+            It.Is<ApiEmergencyResumePayload>(p => p.Reason == "alarm-monitor-resumed"),
             It.IsAny<DateTime>(), 7L, null, It.IsAny<CancellationToken>()), Times.Once);
 
         store.Verify(s => s.AddEmergencyStopAsync(It.IsAny<ApiEmergencyStopPayload>(), It.IsAny<DateTime>(),
@@ -96,7 +96,7 @@ public class AutotrainerDeviceEmergencyEventTests
             new ApiEmergencyStopPayload { Reason = "user-button" }));
         await DrainAsync(device);
 
-        store.Verify(s => s.AddEmergencyResumeAsync(It.IsAny<ApiReasonPayload>(), It.IsAny<DateTime>(),
+        store.Verify(s => s.AddEmergencyResumeAsync(It.IsAny<ApiEmergencyResumePayload>(), It.IsAny<DateTime>(),
             It.IsAny<long>(), It.IsAny<DateTime?>(), It.IsAny<CancellationToken>()), Times.Never);
 
         store.Verify(s => s.AddEmergencyStopAsync(It.IsAny<ApiEmergencyStopPayload>(), It.IsAny<DateTime>(),

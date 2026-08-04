@@ -31,7 +31,7 @@ public class DeviceDataStoreEmergencyTests
             Assert.Equal(ApiEventKind.EmergencyStop, row.Kind);
             Assert.Equal(Occurred, row.OccurredAt);
             Assert.Equal(4242, row.EventIndex);
-            Assert.Equal(EmergencyStopReason.AlarmMonitor, row.StopReasonId);
+            Assert.Equal(ApiEmergencyStopReason.AlarmMonitor, row.StopReasonId);
             Assert.Null(row.ResumeReasonId);
             Assert.Equal("alarm-monitor: DOORS_OPEN", row.ReasonText);   // verbatim, suffix intact
             Assert.Null(row.NotificationSentAt);
@@ -63,7 +63,7 @@ public class DeviceDataStoreEmergencyTests
         {
             await store.AddEmergencyStopAsync(Stop("user-button"), Occurred, eventIndex: 1);
             await store.AddEmergencyResumeAsync(
-                new ApiReasonPayload { Reason = "user-button" }, Occurred, eventIndex: 2);
+                new ApiEmergencyResumePayload { Reason = "user-button" }, Occurred, eventIndex: 2);
 
             using var db = factory.CreateDbContext();
             var rows = db.EmergencyStopHistory.OrderBy(r => r.Id).ToList();
@@ -80,13 +80,13 @@ public class DeviceDataStoreEmergencyTests
         using (factory)
         {
             await store.AddEmergencyResumeAsync(
-                new ApiReasonPayload { Reason = "alarm-monitor-resumed" }, Occurred, eventIndex: 7);
+                new ApiEmergencyResumePayload { Reason = "alarm-monitor-resumed" }, Occurred, eventIndex: 7);
 
             using var db = factory.CreateDbContext();
             var row = db.EmergencyStopHistory.Single();
 
             Assert.Equal(ApiEventKind.EmergencyResume, row.Kind);
-            Assert.Equal(EmergencyResumeReason.AlarmMonitorResumed, row.ResumeReasonId);
+            Assert.Equal(ApiEmergencyResumeReason.AlarmMonitorResume, row.ResumeReasonId);
             Assert.Null(row.StopReasonId);
         }
     }
@@ -103,7 +103,7 @@ public class DeviceDataStoreEmergencyTests
             using var db = factory.CreateDbContext();
             var row = db.EmergencyStopHistory.Single();
 
-            Assert.Equal(EmergencyStopReason.Unknown, row.StopReasonId);
+            Assert.Equal(ApiEmergencyStopReason.Unknown, row.StopReasonId);
             Assert.Equal("brand-new-producer-reason", row.ReasonText);
         }
     }
@@ -184,12 +184,12 @@ public class DeviceDataStoreEmergencyTests
 
             await store.AddEmergencyStopAsync(Stop("user-button"), now.AddMinutes(-3), 1);
             await store.AddEmergencyResumeAsync(
-                new ApiReasonPayload { Reason = "user-button" }, now.AddMinutes(-2), 2);
+                new ApiEmergencyResumePayload { Reason = "user-button" }, now.AddMinutes(-2), 2);
             await store.AddEmergencyStopAsync(Stop("RpcService"), now.AddMinutes(-1), 3);
 
             var all = await store.GetEmergenciesAsync(now.AddDays(-1), [], [], [], FirstPage);
             Assert.Equal(3, all.TotalCount);
-            Assert.Equal(EmergencyStopReason.RpcService, all.Items[0].StopReasonId);   // newest first
+            Assert.Equal(ApiEmergencyStopReason.RpcService, all.Items[0].StopReasonId);   // newest first
 
             var stops = await store.GetEmergenciesAsync(now.AddDays(-1), [ApiEventKind.EmergencyStop], [], [], FirstPage);
             Assert.Equal(2, stops.TotalCount);
@@ -215,14 +215,14 @@ public class DeviceDataStoreEmergencyTests
             await store.AddEmergencyStopAsync(Stop("RpcService"), now.AddMinutes(-1), 3);
 
             var page = await store.GetEmergenciesAsync(now.AddDays(-1), [ApiEventKind.EmergencyStop],
-                [EmergencyStopReason.AlarmMonitor, EmergencyStopReason.RpcService], [], FirstPage);
+                [ApiEmergencyStopReason.AlarmMonitor, ApiEmergencyStopReason.RpcService], [], FirstPage);
 
             Assert.Equal(2, page.TotalCount);
             Assert.All(page.Items, e =>
                 Assert.Contains(e.StopReasonId, new[]
                 {
-                    (EmergencyStopReason?)EmergencyStopReason.AlarmMonitor,
-                    EmergencyStopReason.RpcService
+                    (ApiEmergencyStopReason?)ApiEmergencyStopReason.AlarmMonitor,
+                    ApiEmergencyStopReason.RpcService
                 }));
         }
     }
@@ -236,15 +236,15 @@ public class DeviceDataStoreEmergencyTests
             var now = DateTime.UtcNow;
 
             await store.AddEmergencyResumeAsync(
-                new ApiReasonPayload { Reason = "alarm-monitor-resumed" }, now.AddMinutes(-2), 1);
+                new ApiEmergencyResumePayload { Reason = "alarm-monitor-resumed" }, now.AddMinutes(-2), 1);
             await store.AddEmergencyResumeAsync(
-                new ApiReasonPayload { Reason = "user-button" }, now.AddMinutes(-1), 2);
+                new ApiEmergencyResumePayload { Reason = "user-button" }, now.AddMinutes(-1), 2);
 
             var page = await store.GetEmergenciesAsync(now.AddDays(-1), [ApiEventKind.EmergencyResume],
-                [], [EmergencyResumeReason.AlarmMonitorResumed], FirstPage);
+                [], [ApiEmergencyResumeReason.AlarmMonitorResume], FirstPage);
 
             var item = Assert.Single(page.Items);
-            Assert.Equal(EmergencyResumeReason.AlarmMonitorResumed, item.ResumeReasonId);
+            Assert.Equal(ApiEmergencyResumeReason.AlarmMonitorResume, item.ResumeReasonId);
         }
     }
 
@@ -280,7 +280,7 @@ public class DeviceDataStoreEmergencyTests
                 now.AddMinutes(-3), 1);
             await store.AddEmergencyStopAsync(Stop("user-button"), now.AddMinutes(-2), 2);
             await store.AddEmergencyResumeAsync(
-                new ApiReasonPayload { Reason = "user-button" }, now.AddMinutes(-1), 3);
+                new ApiEmergencyResumePayload { Reason = "user-button" }, now.AddMinutes(-1), 3);
 
             var page = await store.GetEmergenciesAsync(now.AddDays(-1), [], [], [], FirstPage);
 
@@ -306,7 +306,7 @@ public class DeviceDataStoreEmergencyTests
             var item = Assert.Single((await store.GetEmergenciesAsync(now.AddDays(-1), [], [], [], FirstPage)).Items);
 
             // The enum collapses the token suffix; ReasonText is how a caller recovers it.
-            Assert.Equal(EmergencyStopReason.AlarmMonitor, item.StopReasonId);
+            Assert.Equal(ApiEmergencyStopReason.AlarmMonitor, item.StopReasonId);
             Assert.Equal("alarm-monitor: DOORS_OPEN SYSTEM_FAULT", item.ReasonText);
             Assert.Null(item.ResumeReasonId);
             Assert.Equal(sent, item.NotificationSentAt!.Value, TimeSpan.FromSeconds(1));

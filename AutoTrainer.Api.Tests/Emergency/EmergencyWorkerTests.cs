@@ -103,7 +103,7 @@ public class EmergencyWorkerTests
     [Fact]
     public void BuildAlert_Resume_UsesLiveSnapshot_LabelledAsCurrent()
     {
-        var payload = new ApiReasonPayload { Reason = "alarm-monitor-resumed" };
+        var payload = new ApiEmergencyResumePayload { Reason = "alarm-monitor-resumed" };
 
         var live = new List<Alarm> { new() { AlarmId = ApiAlarmKind.Thrashing, IsActive = true, IsEnabled = true } };
 

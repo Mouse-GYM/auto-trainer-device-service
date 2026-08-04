@@ -19,7 +19,7 @@ public interface IDeviceDataStore
     // written already-stamped rather than updated afterwards.
     Task<int> AddEmergencyStopAsync(ApiEmergencyStopPayload payload, DateTime occurredAt, long eventIndex,
         DateTime? notificationSentAt = null, CancellationToken ct = default);
-    Task<int> AddEmergencyResumeAsync(ApiReasonPayload payload, DateTime occurredAt, long eventIndex,
+    Task<int> AddEmergencyResumeAsync(ApiEmergencyResumePayload payload, DateTime occurredAt, long eventIndex,
         DateTime? notificationSentAt = null, CancellationToken ct = default);
 
     // Stamps one specific row, identified by the primary key returned from the insert. Returns false when
@@ -43,7 +43,7 @@ public interface IDeviceDataStore
     // of that kind"; the caller is responsible for not combining a stop-reason filter with a resume-kind
     // filter, which would match nothing.
     Task<PagedResult<EmergencyDto>> GetEmergenciesAsync(DateTime since, ApiEventKind[] kinds,
-        EmergencyStopReason[] stopReasons, EmergencyResumeReason[] resumeReasons, PageRequest page,
+        ApiEmergencyStopReason[] stopReasons, ApiEmergencyResumeReason[] resumeReasons, PageRequest page,
         CancellationToken ct = default);
 
     // The flat cross-animal registry list: a single indexed query on the device database, no per-animal files.
@@ -143,9 +143,9 @@ public partial class DeviceDataStore(
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
-        var reasonId = EmergencyStopReasons.FromReason(payload.Reason);
+        var reasonId = EmergencyStopReasons.From(payload.ReasonCode, payload.Reason);
 
-        if (reasonId == EmergencyStopReason.Unknown)
+        if (reasonId == ApiEmergencyStopReason.Unknown)
             LogUnknownEmergencyReason(ApiEventKind.EmergencyStop, payload.Reason);
 
         var entity = new Entities.EmergencyStopHistory
@@ -167,14 +167,14 @@ public partial class DeviceDataStore(
         return entity.Id;
     }
 
-    public async Task<int> AddEmergencyResumeAsync(ApiReasonPayload payload, DateTime occurredAt,
+    public async Task<int> AddEmergencyResumeAsync(ApiEmergencyResumePayload payload, DateTime occurredAt,
         long eventIndex, DateTime? notificationSentAt = null, CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);
 
-        var reasonId = EmergencyResumeReasons.FromReason(payload.Reason);
+        var reasonId = EmergencyResumeReasons.From(payload.ReasonCode, payload.Reason);
 
-        if (reasonId == EmergencyResumeReason.Unknown)
+        if (reasonId == ApiEmergencyResumeReason.Unknown)
             LogUnknownEmergencyReason(ApiEventKind.EmergencyResume, payload.Reason);
 
         var entity = new Entities.EmergencyStopHistory
@@ -261,7 +261,7 @@ public partial class DeviceDataStore(
     }
 
     public async Task<PagedResult<EmergencyDto>> GetEmergenciesAsync(DateTime since, ApiEventKind[] kinds,
-        EmergencyStopReason[] stopReasons, EmergencyResumeReason[] resumeReasons, PageRequest page,
+        ApiEmergencyStopReason[] stopReasons, ApiEmergencyResumeReason[] resumeReasons, PageRequest page,
         CancellationToken ct = default)
     {
         await using var db = await factory.CreateDbContextAsync(ct);

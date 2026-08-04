@@ -104,6 +104,7 @@ public enum ApiEventKind
     IntertrialDetectionError = 1713,
     IntertrialDetectionSave = 1714,
     IntertrialDetectionSaveError = 1715,
+    IntertrialResponse = 1720,
 
     PelletPresentedCountChanged = 1800,
     PelletConsumedCountChanged = 1802,

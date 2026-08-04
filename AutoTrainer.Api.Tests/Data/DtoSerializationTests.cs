@@ -76,7 +76,7 @@ public class DtoSerializationTests
     public void EmergencyDto_Stop_SerializesAlarmIdsAsArray()
     {
         var json = JsonSerializer.Serialize(
-            new EmergencyDto(1, DateTime.UtcNow, ApiEventKind.EmergencyStop, EmergencyStopReason.AlarmMonitor,
+            new EmergencyDto(1, DateTime.UtcNow, ApiEventKind.EmergencyStop, ApiEmergencyStopReason.AlarmMonitor,
                 null, "alarm-monitor: DOORS_OPEN", [ApiAlarmKind.ExternalDoors, ApiAlarmKind.SystemFault], null),
             JsonDefaults.CamelCase);
 
@@ -100,7 +100,7 @@ public class DtoSerializationTests
     {
         var json = JsonSerializer.Serialize(
             new EmergencyDto(2, DateTime.UtcNow, ApiEventKind.EmergencyResume, null,
-                EmergencyResumeReason.AlarmMonitorResumed, "alarm-monitor-resumed", null, DateTime.UtcNow),
+                ApiEmergencyResumeReason.AlarmMonitorResume, "alarm-monitor-resumed", null, DateTime.UtcNow),
             JsonDefaults.CamelCase);
 
         Assert.Contains("\"activeAlarms\":null", json);

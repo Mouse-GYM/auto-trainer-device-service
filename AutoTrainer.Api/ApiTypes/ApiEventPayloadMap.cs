@@ -17,7 +17,7 @@ public static class ApiEventPayloadMap
     private static readonly Dictionary<ApiEventKind, Type?> s_ForKind = new()
     {
         [ApiEventKind.EmergencyStop] = typeof(ApiEmergencyStopPayload),
-        [ApiEventKind.EmergencyResume] = typeof(ApiReasonPayload),
+        [ApiEventKind.EmergencyResume] = typeof(ApiEmergencyResumePayload),
         [ApiEventKind.ApplicationLaunched] = typeof(ApiVersionPayload),
         [ApiEventKind.ApplicationTerminating] = typeof(ApiReasonPayload),
         [ApiEventKind.ApplicationModeChanged] = typeof(ApiApplicationModePayload),
@@ -89,6 +89,7 @@ public static class ApiEventPayloadMap
         [ApiEventKind.IntertrialDetectionError] = typeof(ApiIntertrialErrorPayload),
         [ApiEventKind.IntertrialDetectionSave] = typeof(ApiIntertrialSavePayload),
         [ApiEventKind.IntertrialDetectionSaveError] = typeof(ApiIntertrialErrorPayload),
+        [ApiEventKind.IntertrialResponse] = typeof(ApiIntertrialResponsePayload),
         [ApiEventKind.PelletPresentedCountChanged] = typeof(ApiCountChangePayload),
         [ApiEventKind.PelletConsumedCountChanged] = typeof(ApiCountChangePayload),
         [ApiEventKind.ReachCountChanged] = typeof(ApiCountChangePayload),

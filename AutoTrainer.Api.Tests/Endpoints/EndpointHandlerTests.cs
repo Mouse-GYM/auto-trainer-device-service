@@ -199,7 +199,7 @@ public class EndpointHandlerTests
     {
         await store.AddEmergencyStopAsync(new ApiEmergencyStopPayload { Reason = "user-button" },
             DateTime.UtcNow.AddMinutes(-2), eventIndex: 1);
-        await store.AddEmergencyResumeAsync(new ApiReasonPayload { Reason = "alarm-monitor-resumed" },
+        await store.AddEmergencyResumeAsync(new ApiEmergencyResumePayload { Reason = "alarm-monitor-resumed" },
             DateTime.UtcNow.AddMinutes(-1), eventIndex: 2);
     }
 

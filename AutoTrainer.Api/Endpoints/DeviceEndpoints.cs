@@ -77,19 +77,19 @@ public static class DeviceEndpoints
         // Asking for both kinds explicitly is the same as asking for all of them.
         var only = kinds.Distinct().ToArray() is [var single] ? single : (ApiEventKind?)null;
 
-        EmergencyStopReason[] stopReasons = [];
-        EmergencyResumeReason[] resumeReasons = [];
+        ApiEmergencyStopReason[] stopReasons = [];
+        ApiEmergencyResumeReason[] resumeReasons = [];
 
         if (only == ApiEventKind.EmergencyStop)
         {
-            if (!EnumFilter.TryParse<EmergencyStopReason>(code, out var parsed, out var codeError))
+            if (!EnumFilter.TryParse<ApiEmergencyStopReason>(code, out var parsed, out var codeError))
                 return TypedResults.BadRequest(codeError);
 
             stopReasons = [.. parsed];
         }
         else if (only == ApiEventKind.EmergencyResume)
         {
-            if (!EnumFilter.TryParse<EmergencyResumeReason>(code, out var parsed, out var codeError))
+            if (!EnumFilter.TryParse<ApiEmergencyResumeReason>(code, out var parsed, out var codeError))
                 return TypedResults.BadRequest(codeError);
 
             resumeReasons = [.. parsed];

@@ -124,10 +124,30 @@ public class ApiTrainingPhasePayload
 // ──────────────────────────────────────────────
 
 // EmergencyStopContext
+//
+// ReasonCode is nullable even though the Python TypedDict requires it: producers predating the field are
+// still in service and send only `reason`. Null means "this producer did not classify the stop" -- fall
+// back to interpreting the Reason string. Do not default it to Unknown, which the producer uses to mean
+// "classified, but not a known member" and is a different statement.
 public class ApiEmergencyStopPayload
 {
     public string Reason { get; set; } = "";
+    public ApiEmergencyStopReason? ReasonCode { get; set; }
     public List<ApiAlarmKind> ActiveAlarms { get; set; } = [];
+}
+
+// EmergencyResumeContext — extends ReasonContext in Python, so it does here too; a resume payload still
+// satisfies `is ApiReasonPayload`.
+//
+// ResumedAlarms is the alarms that auto-resumed (cleared themselves, and by clearing lifted the stop). It
+// is not "the alarms this resume applies to": an alarm still engaged, or one a person resumed past, never
+// appears. Only AlarmMonitorResume is expected to be non-empty; every other reason sends [].
+//
+// See ApiEmergencyStopPayload for why ReasonCode is nullable.
+public class ApiEmergencyResumePayload : ApiReasonPayload
+{
+    public ApiEmergencyResumeReason? ReasonCode { get; set; }
+    public List<ApiAlarmKind> ResumedAlarms { get; set; } = [];
 }
 
 // VersionContext
@@ -267,9 +287,20 @@ public class ApiReleaseTonePayload
 }
 
 // DayStartedContext — seconds since the epoch.
+// DayPath is NotRequired in Python: omitted when not known, and absent from older production events.
 public class ApiDayStartedPayload
 {
     public double Date { get; set; }
+    public string? DayPath { get; set; }
+}
+
+// IntertrialResponseContext — the trial's intertrial analysis responses.
+public class ApiIntertrialResponsePayload
+{
+    public string SessionId { get; set; } = "";
+    public int TrialId { get; set; }
+    public string? BatchId { get; set; }
+    public IntertrialResponse? ResponseData { get; set; }
 }
 
 // TrialReachEventsContext
@@ -374,6 +405,19 @@ public static class ReachEventOutcome
         Eaten => 5,
         _ => 0
     };
+}
+
+// IntertrialResponseDict — from autotrainer.inference.analysis.IntertrialResponse.
+// RhMaxVpList entries are (x, y, z) relative offsets, each null when the offset could not be determined.
+// The source type also carries a deprecated pellets_presented that rides over the wire and is not mirrored.
+public class IntertrialResponse
+{
+    public List<List<double>?> RhMaxVpList { get; set; } = [];
+    public List<ReachEvent> ReachEvents { get; set; } = [];
+    public List<ReachEvent> OtherEvents { get; set; } = [];
+    public int FoodConsumed { get; set; }
+    public int SuccessfulReaches { get; set; }
+    public int TotalReaches { get; set; }
 }
 
 // ReachEventDict — from autotrainer.core.ReachEvent

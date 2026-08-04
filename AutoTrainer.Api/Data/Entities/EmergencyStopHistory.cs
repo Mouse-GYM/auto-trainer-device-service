@@ -1,5 +1,4 @@
 using AutoTrainer.Api.ApiTypes;
-using AutoTrainer.Api.Models;
 
 namespace AutoTrainer.Api.Data.Entities;
 
@@ -20,8 +19,8 @@ public class EmergencyStopHistory : SoftDeleteEntity
 
     // Exactly one is set, per Kind. The raw string is always kept, including when a reason converts to
     // Unknown, so a new producer string is never lost.
-    public EmergencyStopReason? StopReasonId { get; set; }
-    public EmergencyResumeReason? ResumeReasonId { get; set; }
+    public ApiEmergencyStopReason? StopReasonId { get; set; }
+    public ApiEmergencyResumeReason? ResumeReasonId { get; set; }
     public string ReasonText { get; set; } = "";
 
     // JSON array of ApiAlarmKind ids from the stop payload; "[]" when the stop carried none, null on
