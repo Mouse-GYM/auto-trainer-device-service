@@ -1,6 +1,7 @@
 using System.Text.Json;
 using AutoTrainer.Api.ApiTypes;
 using AutoTrainer.Api.Contracts;
+using AutoTrainer.Api.Models;
 using Xunit;
 
 namespace AutoTrainer.Api.Tests.Data;
@@ -67,5 +68,43 @@ public class DtoSerializationTests
             JsonDefaults.CamelCase);
 
         Assert.Contains("\"observedAt\":", json);
+    }
+
+    // The alarm set goes out as a real array of ids, not the JSON string the column stores. Kind and the
+    // reason ids serialize as numbers, matching every other enum on the wire.
+    [Fact]
+    public void EmergencyDto_Stop_SerializesAlarmIdsAsArray()
+    {
+        var json = JsonSerializer.Serialize(
+            new EmergencyDto(1, DateTime.UtcNow, ApiEventKind.EmergencyStop, EmergencyStopReason.AlarmMonitor,
+                null, "alarm-monitor: DOORS_OPEN", [ApiAlarmKind.ExternalDoors, ApiAlarmKind.SystemFault], null),
+            JsonDefaults.CamelCase);
+
+        Assert.Contains("\"occurredAt\":", json);
+        Assert.Contains("\"kind\":101", json);
+        Assert.Contains("\"stopReasonId\":101", json);
+        Assert.Contains("\"resumeReasonId\":null", json);
+        Assert.Contains("\"reasonText\":\"alarm-monitor: DOORS_OPEN\"", json);
+        Assert.Contains("\"activeAlarms\":[101,501]", json);
+        Assert.Contains("\"notificationSentAt\":null", json);
+
+        Assert.DoesNotContain("createdAt", json);
+        Assert.DoesNotContain("updatedAt", json);
+        Assert.DoesNotContain("deletedAt", json);
+        Assert.DoesNotContain("eventIndex", json);   // an internal correlation key, not part of the contract
+    }
+
+    // Null and [] mean different things: the resume payload has no alarm field at all.
+    [Fact]
+    public void EmergencyDto_Resume_SerializesNullActiveAlarms()
+    {
+        var json = JsonSerializer.Serialize(
+            new EmergencyDto(2, DateTime.UtcNow, ApiEventKind.EmergencyResume, null,
+                EmergencyResumeReason.AlarmMonitorResumed, "alarm-monitor-resumed", null, DateTime.UtcNow),
+            JsonDefaults.CamelCase);
+
+        Assert.Contains("\"activeAlarms\":null", json);
+        Assert.Contains("\"stopReasonId\":null", json);
+        Assert.Contains("\"resumeReasonId\":101", json);
     }
 }

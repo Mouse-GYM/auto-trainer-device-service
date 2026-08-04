@@ -24,6 +24,29 @@ public partial class AutotrainerDevice
 
     private DateTime _lastWebImageBroadcast = DateTime.MinValue;
 
+    // Correlates an emergency history row with the notification published for the same event. The insert and
+    // the stamp arrive from independent workers in either order, so whichever runs first leaves a note here
+    // for the other: _emergencyRowIds carries an inserted row's id for a stamp still to come, _pendingStamps
+    // carries a send time for an insert still to come.
+    //
+    // Both are read and written ONLY from inside actions queued on _updateChannel, which DeviceUpdateWorker
+    // drains one at a time -- so access is single-threaded and needs no locking. Never touch them from the
+    // enqueueing methods themselves; that code runs on the caller's thread.
+    // Each entry carries when it was added, so eviction can prefer entries that have plainly lost their
+    // counterpart over ones that may still be in flight.
+    private readonly Dictionary<(ApiEventKind Kind, long Index), (int Value, DateTime AddedAt)> _emergencyRowIds = [];
+    private readonly Dictionary<(ApiEventKind Kind, long Index), (DateTime Value, DateTime AddedAt)> _pendingStamps = [];
+
+    // Not a cap -- the size at which a sweep for expired entries becomes worth doing. Entries are only ever
+    // removed by age, never to satisfy a count.
+    private const int EmergencyCorrelationSweepThreshold = 32;
+
+    // A counterpart arrives within one SNS round trip plus a channel drain -- seconds. Anything older than
+    // this has lost its counterpart for good (the emergency queue dropped the event, or the event-topic copy
+    // never arrived). Deliberately generous: evicting a live entry orphans a delivered notification, while
+    // keeping a dead one costs a dictionary slot.
+    private static readonly TimeSpan EmergencyCorrelationTimeout = TimeSpan.FromMinutes(5);
+
     // Running 5-day reach-status total for the selected animal (surfaced as Animal.ReachStatus5Day). Seeded from
     // the day table on selection and re-seeded on a DayPath day rollover; the current day's counts are updated in
     // memory from reach-status events. _fiveDayId is the animal the running total currently belongs to.
@@ -158,6 +181,57 @@ public partial class AutotrainerDevice
                             catch (Exception ex)
                             {
                                 LogPersistDetectorHistoryFailed(ex, ctx.DetectorId);
+                            }
+                        }
+                        break;
+                    }
+                // The two emergency kinds are handled separately on purpose: ApiEmergencyStopPayload does NOT
+                // derive from ApiReasonPayload, so a shared `is ApiReasonPayload` test would silently drop
+                // every stop. Each insert is also half of the notification rendezvous -- see OnNotificationSent.
+                case ApiEventKind.EmergencyStop:
+                    {
+                        if (payload is ApiEmergencyStopPayload ctx)
+                        {
+                            var key = (apiEvent.Kind, (long)apiEvent.Index);
+
+                            // Read-and-remove first: if the insert throws, the pending stamp dies with the row
+                            // it would have marked, which is correct -- there is nothing to stamp.
+                            DateTime? alreadySent = _pendingStamps.Remove(key, out var pending) ? pending.Value : null;
+
+                            try
+                            {
+                                var id = await _deviceStore.AddEmergencyStopAsync(
+                                    ctx, ToUtc(apiEvent.When), key.Item2, alreadySent);
+
+                                if (alreadySent is null)
+                                    RememberEmergencyRow(key, id);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogPersistEmergencyFailed(ex, apiEvent.Kind);
+                            }
+                        }
+                        break;
+                    }
+                case ApiEventKind.EmergencyResume:
+                    {
+                        if (payload is ApiReasonPayload ctx)
+                        {
+                            var key = (apiEvent.Kind, (long)apiEvent.Index);
+
+                            DateTime? alreadySent = _pendingStamps.Remove(key, out var pending) ? pending.Value : null;
+
+                            try
+                            {
+                                var id = await _deviceStore.AddEmergencyResumeAsync(
+                                    ctx, ToUtc(apiEvent.When), key.Item2, alreadySent);
+
+                                if (alreadySent is null)
+                                    RememberEmergencyRow(key, id);
+                            }
+                            catch (Exception ex)
+                            {
+                                LogPersistEmergencyFailed(ex, apiEvent.Kind);
                             }
                         }
                         break;
@@ -470,6 +544,75 @@ public partial class AutotrainerDevice
 
             await _hubContext.Clients.All.EventReceived(apiEvent);
         });
+    }
+
+    // Records that an operator notification went out for this event. Queued on the same channel as the history
+    // insert so the two are serialized, but NOT assumed to run after it -- the emergency-topic copy and the
+    // event-topic copy are handled by independent workers, so if the row does not exist yet the send time is
+    // held for the insert to apply.
+    public void OnNotificationSent(ApiEvent apiEvent, DateTime sentAt)
+    {
+        _updateChannel.Writer.TryWrite(async () =>
+        {
+            var key = (apiEvent.Kind, (long)apiEvent.Index);
+
+            try
+            {
+                if (_emergencyRowIds.Remove(key, out var row))
+                    await _deviceStore.MarkNotificationSentAsync(row.Value, sentAt);
+                else
+                    RememberPendingStamp(key, sentAt);
+            }
+            catch (Exception ex)
+            {
+                LogStampNotificationFailed(ex, apiEvent.Kind);
+            }
+        });
+    }
+
+    private void RememberEmergencyRow((ApiEventKind Kind, long Index) key, int id)
+    {
+        EvictCorrelations(_emergencyRowIds, nameof(_emergencyRowIds));
+        _emergencyRowIds[key] = (id, DateTime.UtcNow);
+    }
+
+    private void RememberPendingStamp((ApiEventKind Kind, long Index) key, DateTime sentAt)
+    {
+        EvictCorrelations(_pendingStamps, nameof(_pendingStamps));
+        _pendingStamps[key] = (sentAt, DateTime.UtcNow);
+    }
+
+    // Drops correlation entries that have provably lost their counterpart, and only those.
+    //
+    // Age is the only safe criterion. Evicting by count -- clearing the map, or dropping the oldest entry to
+    // hold a hard cap -- can discard the id of an event whose SNS publish is still running: the stamp then
+    // arrives, finds nothing to update, and parks a pending entry that its already-completed insert can never
+    // consume, leaving a delivered notification permanently recorded as unsent. A burst of emergency events
+    // during one slow publish is exactly when that happens, so a recent entry is never evicted.
+    //
+    // The map is therefore bounded by the timeout rather than by a count: at any plausible emergency rate
+    // that is a handful of entries, and each is two longs and a timestamp.
+    private void EvictCorrelations<TValue>(
+        Dictionary<(ApiEventKind Kind, long Index), (TValue Value, DateTime AddedAt)> map, string name)
+    {
+        // The threshold only decides when it is worth scanning; it is not a cap.
+        if (map.Count < EmergencyCorrelationSweepThreshold)
+            return;
+
+        var cutoff = DateTime.UtcNow - EmergencyCorrelationTimeout;
+
+        var expired = map.Where(e => e.Value.AddedAt < cutoff).Select(e => e.Key).ToList();
+
+        foreach (var key in expired)
+        {
+            map.Remove(key);
+            LogEmergencyCorrelationEvicted(name, key.Kind, key.Index);
+        }
+
+        // Still large after sweeping means many counterparts are genuinely in flight at once. Surface it
+        // rather than dropping data to force the number down.
+        if (map.Count >= EmergencyCorrelationSweepThreshold)
+            LogEmergencyCorrelationsRetained(name, map.Count);
     }
 
     public void OnCommandResponse(ApiCommandRequestResponse response)
@@ -953,6 +1096,20 @@ public partial class AutotrainerDevice
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist detector history for {detectorId}")]
     private partial void LogPersistDetectorHistoryFailed(Exception ex, ApiDetectorKind detectorId);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist emergency history for {kind}")]
+    private partial void LogPersistEmergencyFailed(Exception ex, ApiEventKind kind);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to record the notification stamp for {kind}")]
+    private partial void LogStampNotificationFailed(Exception ex, ApiEventKind kind);
+
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "Evicted {kind} index {index} from {map}; its counterpart never arrived.")]
+    private partial void LogEmergencyCorrelationEvicted(string map, ApiEventKind kind, long index);
+
+    [LoggerMessage(Level = LogLevel.Debug,
+        Message = "{map} still holds {count} unexpired entries; counterparts are outstanding, not leaked.")]
+    private partial void LogEmergencyCorrelationsRetained(string map, int count);
 
     [LoggerMessage(Level = LogLevel.Information, Message = "Device data path: {path}")]
     private partial void LogDeviceDataPath(string path);

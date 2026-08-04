@@ -567,7 +567,7 @@ public class AutotrainerDeviceAnimalEventTests
     }
 
     // Regression: this event's payload is IsEnabledContext ("isEnabled"), but it used to be deserialized as
-    // ApiIsEngagedPayload ("isEngaged"). The field never matched, so LoadCellEnabled was always false.
+    // ApiIsEngagedPayload ("isEngaged"). The field never matched, so LoadCellTriggered was always false.
     [Fact]
     public async Task HeadfixLoadCellEnabledChanged_ReadsIsEnabled()
     {
@@ -577,7 +577,56 @@ public class AutotrainerDeviceAnimalEventTests
             new ApiIsEnabledPayload { IsEnabled = true }));
         await DrainAsync(device);
 
-        Assert.True(device.Behavior.LoadCellEnabled);
+        Assert.True(device.Behavior.LoadCellTriggered);
+    }
+
+    [Fact]
+    public async Task HeadFixationForceDetectorChanged_SetsHeadbarPressureTriggered()
+    {
+        var (device, _, clients, _, _) = Build();
+
+        device.OnApiEvent(Event(ApiEventKind.HeadFixationForceDetectorChanged,
+            new ApiIsEnabledPayload { IsEnabled = true }));
+        await DrainAsync(device);
+
+        Assert.True(device.Behavior.HeadbarPressureTriggered);
+        clients.Verify(c => c.BehaviorChanged(It.IsAny<Behavior>()), Times.Once);
+    }
+
+    // The behavior-scoped flag and the raw sensor reading are separate: this event must not touch Analysis,
+    // and HeadbarPressureEngagedChanged must not touch Behavior.
+    [Fact]
+    public async Task HeadbarPressure_BehaviorAndAnalysisFlagsAreIndependent()
+    {
+        var (device, _, _, _, _) = Build();
+
+        device.OnApiEvent(Event(ApiEventKind.HeadFixationForceDetectorChanged,
+            new ApiIsEnabledPayload { IsEnabled = true }));
+        await DrainAsync(device);
+
+        Assert.True(device.Behavior.HeadbarPressureTriggered);
+        Assert.False(device.Analysis.HeadbarPressureEngaged);
+
+        device.OnApiEvent(Event(ApiEventKind.HeadbarPressureEngagedChanged,
+            new ApiIsEngagedPayload { IsEngaged = true }));
+        await DrainAsync(device);
+
+        Assert.True(device.Analysis.HeadbarPressureEngaged);
+        Assert.True(device.Behavior.HeadbarPressureTriggered);   // unchanged by the Analysis-side event
+    }
+
+    // The two IsEnabledContext events drive different Behavior flags; neither may bleed into the other.
+    [Fact]
+    public async Task LoadCellAndHeadbarPressure_AreSeparateBehaviorFlags()
+    {
+        var (device, _, _, _, _) = Build();
+
+        device.OnApiEvent(Event(ApiEventKind.HeadfixLoadCellEnabledChanged,
+            new ApiIsEnabledPayload { IsEnabled = true }));
+        await DrainAsync(device);
+
+        Assert.True(device.Behavior.LoadCellTriggered);
+        Assert.False(device.Behavior.HeadbarPressureTriggered);
     }
 
     // A malformed payload must not take the event down: it is logged and the broadcast still happens.

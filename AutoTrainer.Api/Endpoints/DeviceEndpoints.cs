@@ -14,13 +14,16 @@ public static class DeviceEndpoints
         device.MapGet("/cage/latest", GetLatestCageImage);
         device.MapGet("/alarms", GetAlarms);
         device.MapGet("/detectors", GetDetectors);
+        device.MapGet("/emergencies", GetEmergencies);
         device.MapGet("/events", GetApiEventHistory);
 
         return app;
     }
 
-    internal static async Task<IResult> GetAlarms(string? within, string[]? alarmId, int? page, int? pageSize,
-        IDeviceDataStore store, CancellationToken ct)
+    // isEnabled is omitted for "either". These are history rows, so it selects observations recorded while the
+    // alarm was enabled or disabled -- not what is enabled right now, which GET /device reports.
+    internal static async Task<IResult> GetAlarms(string? within, string[]? alarmId, bool? isEnabled, int? page,
+        int? pageSize, IDeviceDataStore store, CancellationToken ct)
     {
         if (!TimeWindow.TryParse(within, out var window))
             return TypedResults.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
@@ -29,12 +32,12 @@ public static class DeviceEndpoints
             return TypedResults.BadRequest(err);
 
         var pr = PageRequest.From(page, pageSize);
-        var result = await store.GetAlarmsAsync(window.StartUtc(DateTime.UtcNow), [.. alarmIds], pr, ct);
+        var result = await store.GetAlarmsAsync(window.StartUtc(DateTime.UtcNow), [.. alarmIds], isEnabled, pr, ct);
         return TypedResults.Ok(result);
     }
 
-    internal static async Task<IResult> GetDetectors(string? within, string[]? detectorId, int? page, int? pageSize,
-        IDeviceDataStore store, CancellationToken ct)
+    internal static async Task<IResult> GetDetectors(string? within, string[]? detectorId, bool? isEnabled,
+        int? page, int? pageSize, IDeviceDataStore store, CancellationToken ct)
     {
         if (!TimeWindow.TryParse(within, out var window))
             return TypedResults.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
@@ -43,7 +46,58 @@ public static class DeviceEndpoints
             return TypedResults.BadRequest(err);
 
         var pr = PageRequest.From(page, pageSize);
-        var result = await store.GetDetectorsAsync(window.StartUtc(DateTime.UtcNow), [.. detectorIds], pr, ct);
+        var result = await store.GetDetectorsAsync(window.StartUtc(DateTime.UtcNow), [.. detectorIds], isEnabled, pr, ct);
+        return TypedResults.Ok(result);
+    }
+
+    // Only the two emergency kinds ever appear in this table. Anything else is rejected rather than silently
+    // returning an empty page, since EnumFilter happily parses any ApiEventKind name.
+    private static readonly ApiEventKind[] s_EmergencyKinds =
+        [ApiEventKind.EmergencyStop, ApiEventKind.EmergencyResume];
+
+    // `code` filters on the reason code, but a code only identifies a reason once the kind is known: the stop
+    // and resume reasons are separate enums that deliberately share integer values (201 is UserButton in
+    // both, 101 is AlarmMonitor for a stop and AlarmMonitorResumed for a resume). So `code` applies only when
+    // `kind` narrows to exactly one direction. When the request returns both kinds, `code` is ignored
+    // outright -- not validated, not applied -- because there is no enum to interpret it against.
+    internal static async Task<IResult> GetEmergencies(string? within, string[]? kind, string[]? code,
+        int? page, int? pageSize, IDeviceDataStore store, CancellationToken ct)
+    {
+        if (!TimeWindow.TryParse(within, out var window))
+            return TypedResults.BadRequest($"Invalid time window '{within}'. {TimeWindow.Usage}");
+
+        if (!EnumFilter.TryParse<ApiEventKind>(kind, out var kinds, out var err))
+            return TypedResults.BadRequest(err);
+
+        if (kinds.Except(s_EmergencyKinds).ToArray() is { Length: > 0 } unsupported)
+            return TypedResults.BadRequest(
+                $"Unsupported kind '{string.Join(", ", unsupported)}'. Use {nameof(ApiEventKind.EmergencyStop)} " +
+                $"or {nameof(ApiEventKind.EmergencyResume)}.");
+
+        // Asking for both kinds explicitly is the same as asking for all of them.
+        var only = kinds.Distinct().ToArray() is [var single] ? single : (ApiEventKind?)null;
+
+        EmergencyStopReason[] stopReasons = [];
+        EmergencyResumeReason[] resumeReasons = [];
+
+        if (only == ApiEventKind.EmergencyStop)
+        {
+            if (!EnumFilter.TryParse<EmergencyStopReason>(code, out var parsed, out var codeError))
+                return TypedResults.BadRequest(codeError);
+
+            stopReasons = [.. parsed];
+        }
+        else if (only == ApiEventKind.EmergencyResume)
+        {
+            if (!EnumFilter.TryParse<EmergencyResumeReason>(code, out var parsed, out var codeError))
+                return TypedResults.BadRequest(codeError);
+
+            resumeReasons = [.. parsed];
+        }
+
+        var pr = PageRequest.From(page, pageSize);
+        var result = await store.GetEmergenciesAsync(window.StartUtc(DateTime.UtcNow), [.. kinds],
+            stopReasons, resumeReasons, pr, ct);
         return TypedResults.Ok(result);
     }
 
