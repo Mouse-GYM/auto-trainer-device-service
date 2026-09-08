@@ -41,6 +41,17 @@ public readonly record struct ApiBehaviorStatus
 {
     public double BaselineMagnetIntensity { get; init; }
     public ApiReachStatus Reaches { get; init; }
+
+    // Settings, each set by the like-named ApiCommandKind in the 1000-1099 range. A setting keeps its value
+    // while whatever gates it is off, so these report what is configured rather than what is in force.
+    public bool IsLiveAnalysisEnabled { get; init; }
+    public bool IsPelletDeliveryEnabled { get; init; }
+    public bool IsPelletCoverEnabled { get; init; }
+    public bool IsIntertrialPelletShiftEnabled { get; init; }
+    public bool IsTrianglePelletDistanceDetectionEnabled { get; init; }
+    public bool IsAutoCloseGateOnIntertrialEnabled { get; init; }
+    public bool IsAutoClampEnabled { get; init; }
+    public bool IsBatchTrialsEnabled { get; init; }
 }
 
 public readonly record struct ApiAnimalStatus
@@ -65,8 +76,6 @@ public readonly record struct ApiDetectorStatus
 public readonly record struct ApiAlarmStatus
 {
     public ApiAlarmKind AlarmId { get; init; }
-    // TODO Temporary until updated application has been out awhile.
-    public ApiAlarmKind DetectorId { get; init; }
     public bool IsActive { get; init; }
     public bool IsEnabled { get; init; }
     public bool IsAutoResumeEnabled { get; init; }

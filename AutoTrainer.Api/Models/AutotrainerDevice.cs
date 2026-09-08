@@ -430,6 +430,17 @@ public partial class AutotrainerDevice
                         }
                         break;
                     }
+                case ApiEventKind.AutoClampEnabledChanged:
+                    {
+                        // Alone among the 1000-1099 behavior settings, auto-clamp publishes an event when it
+                        // changes, so the model does not have to wait for the next systemStatus to catch up.
+                        if (payload is ApiIsEnabledPayload ctx)
+                        {
+                            Behavior.IsAutoClampEnabled = ctx.IsEnabled;
+                            await _hubContext.Clients.All.BehaviorChanged(Behavior);
+                        }
+                        break;
+                    }
                 case ApiEventKind.HeadFixationForceDetectorChanged:
                     {
                         // IsEnabledContext, like HeadfixLoadCellEnabledChanged. Distinct from
@@ -1003,7 +1014,7 @@ public partial class AutotrainerDevice
 
     private static Alarm MapAlarm(ApiAlarmStatus s) => new()
     {
-        AlarmId = s.AlarmId != 0 ? s.AlarmId : s.DetectorId,
+        AlarmId = s.AlarmId,
         IsActive = s.IsActive,
         IsEnabled = s.IsEnabled,
         IsAutoResumeEnabled = s.IsAutoResumeEnabled,

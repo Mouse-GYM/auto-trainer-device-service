@@ -113,8 +113,7 @@ public partial class DeviceDataStore(
 
         db.AlarmHistory.Add(new Entities.AlarmHistory
         {
-            AlarmId = status.AlarmId != 0 ? status.AlarmId : status.DetectorId,
-            DetectorId = status.DetectorId,
+            AlarmId = status.AlarmId,
             IsActive = status.IsActive,
             IsEnabled = status.IsEnabled,
             IsAutoResumeEnabled = status.IsAutoResumeEnabled,

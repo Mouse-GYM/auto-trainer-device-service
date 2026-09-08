@@ -28,6 +28,14 @@ public class PelletDevice
     [JsonConverter(typeof(NullNanDoubleConverter))]
     public double BarrierArm { get; set; }
 
+    public bool IsBarrierArmActive { get; set; }
+
+    // Behavior settings the producer reports on the pellet device rather than on ApiBehaviorStatus, each set by
+    // the like-named ApiCommandKind in the 1000-1099 range.
+    public bool IsHomeOnExcessiveDriftEnabled { get; set; }
+
+    public bool IsTunnelSweepEnabled { get; set; }
+
     public ApiEventKind LastCommand { get; set; } = ApiEventKind.PropertyChanged;
 
     public double LastCommandWhen { get; set; }
@@ -50,5 +58,10 @@ public class PelletDevice
 
         LoadArm = status.LoadArm;
         BarrierArm = status.BarrierArm;
+
+        IsBarrierArmActive = status.IsBarrierArmActive;
+
+        IsHomeOnExcessiveDriftEnabled = status.IsHomeOnExcessiveDriftEnabled;
+        IsTunnelSweepEnabled = status.IsTunnelSweepEnabled;
     }
 }

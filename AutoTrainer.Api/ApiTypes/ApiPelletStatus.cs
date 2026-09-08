@@ -29,4 +29,9 @@ public readonly record struct ApiPelletStatus
     public double BarrierArm { get; init; }
 
     public bool IsBarrierArmActive { get; init; }
+
+    // Settings, each set by the like-named ApiCommandKind in the 1000-1099 range.
+    public bool IsHomeOnExcessiveDriftEnabled { get; init; }
+
+    public bool IsTunnelSweepEnabled { get; init; }
 }
