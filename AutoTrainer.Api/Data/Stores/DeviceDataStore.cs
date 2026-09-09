@@ -6,10 +6,46 @@ using Entities = AutoTrainer.Api.Data.Entities;
 
 namespace AutoTrainer.Api.Data.Stores;
 
+// The device registry's notes for one animal: the free-text TrainerNotes column plus the newest entry in the
+// animal's behavior-note log (null when the log is empty).
+public sealed record AnimalNotes(string TrainerNotes, NoteDto? BehaviorNote)
+{
+    public static readonly AnimalNotes Empty = new("", null);
+}
+
+public enum NoteWriteOutcome { Ok, NoSuchAnimal, NoSuchNote }
+
+// Note is set only when Outcome is Ok, and is null for a delete.
+public readonly record struct NoteWriteResult(NoteWriteOutcome Outcome, NoteDto? Note);
+
+// Ordering for both note logs. Newest-first is the default; ?sort=createdAt asks for the reverse.
+public static class NoteSort
+{
+    public const string CreatedAt = "createdAt";
+
+    public static bool IsSupported(SortRequest sort) => !sort.HasSort || sort.Is(CreatedAt);
+
+    public static IOrderedQueryable<T> Apply<T>(IQueryable<T> q, SortRequest sort) where T : Entities.AuditableEntity =>
+        sort.Is(CreatedAt) && !sort.Descending
+            ? q.OrderBy(n => n.CreatedAt).ThenBy(n => n.Id)
+            : q.OrderByDescending(n => n.CreatedAt).ThenByDescending(n => n.Id);
+}
+
 public interface IDeviceDataStore
 {
     Task InitializeAsync(CancellationToken ct = default);
     Task AddSystemConfigurationAsync(ApiSystemConfiguration config, CancellationToken ct = default);
+
+    // The device's own note log, newest-first by default. Soft-deleted notes are filtered out.
+    Task<PagedResult<NoteDto>> GetSystemNotesAsync(SortRequest sort, PageRequest page, CancellationToken ct = default);
+
+    // The newest surviving system note, or null when the log is empty. What the live model carries.
+    Task<NoteDto?> GetLatestSystemNoteAsync(CancellationToken ct = default);
+
+    Task<NoteDto> AddSystemNoteAsync(string body, CancellationToken ct = default);
+    Task<NoteWriteResult> EditSystemNoteAsync(int noteId, string body, CancellationToken ct = default);
+    Task<NoteWriteResult> DeleteSystemNoteAsync(int noteId, CancellationToken ct = default);
+
     Task AddAlarmHistoryAsync(ApiAlarmStatus status, CancellationToken ct = default);
     Task AddDetectorHistoryAsync(ApiDetectorStatus status, CancellationToken ct = default);
 
@@ -56,6 +92,23 @@ public interface IDeviceDataStore
     // Set the registry name for an animal (from .animalSelected/.animalUpdated). Creates the row if missing,
     // and only writes when the name actually changes.
     Task SetAnimalNameAsync(string identifier, string name, CancellationToken ct = default);
+
+    // One animal's behavior-note log. Null when the animal has no registry row, which the endpoint reports as
+    // 404 -- distinct from a registered animal with an empty log, which is an empty page.
+    Task<PagedResult<NoteDto>?> GetBehaviorNotesAsync(string identifier, SortRequest sort, PageRequest page,
+        CancellationToken ct = default);
+
+    // The registry notes for one animal. An animal can be selected before anything registers it, so no row is
+    // not an error: it yields AnimalNotes.Empty, the same way an unwritten count reads as zero.
+    Task<AnimalNotes> GetAnimalNotesAsync(string identifier, CancellationToken ct = default);
+
+    // The behavior-note writes. NoSuchAnimal when the animal has no registry row -- unlike RegisterAnimalAsync /
+    // SetAnimalNameAsync these deliberately do NOT create one, so a typo'd identifier cannot mint a phantom
+    // animal that then shows up in GET /animals.
+    Task<NoteWriteResult> AddBehaviorNoteAsync(string identifier, string body, CancellationToken ct = default);
+    Task<NoteWriteResult> EditBehaviorNoteAsync(string identifier, int noteId, string body,
+        CancellationToken ct = default);
+    Task<NoteWriteResult> DeleteBehaviorNoteAsync(string identifier, int noteId, CancellationToken ct = default);
 }
 
 public partial class DeviceDataStore(
@@ -69,6 +122,7 @@ public partial class DeviceDataStore(
         LogMigratingDatabase();
         await using var db = await factory.CreateDbContextAsync(ct);
         await db.Database.MigrateAsync(ct);
+
         LogDatabaseReady();
     }
 
@@ -105,6 +159,82 @@ public partial class DeviceDataStore(
         });
 
         await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<PagedResult<NoteDto>> GetSystemNotesAsync(SortRequest sort, PageRequest page,
+        CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var q = db.SystemNotes.AsNoTracking();
+        var total = await q.CountAsync(ct);
+
+        var items = await NoteSort.Apply(q, sort)
+            .Skip(page.Skip).Take(page.PageSize)
+            .Select(n => new NoteDto(n.Id, n.Body, n.AuthorId, n.CreatedAt, n.UpdatedAt))
+            .ToListAsync(ct);
+
+        return new PagedResult<NoteDto>(items, page.Page, page.PageSize, total);
+    }
+
+    public async Task<NoteDto?> GetLatestSystemNoteAsync(CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        return await db.SystemNotes.AsNoTracking()
+            .OrderByDescending(n => n.CreatedAt).ThenByDescending(n => n.Id)
+            .Select(n => new NoteDto(n.Id, n.Body, n.AuthorId, n.CreatedAt, n.UpdatedAt))
+            .FirstOrDefaultAsync(ct);
+    }
+
+    public async Task<NoteDto> AddSystemNoteAsync(string body, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var row = new Entities.SystemNote { Body = body };
+        db.SystemNotes.Add(row);
+        await db.SaveChangesAsync(ct);
+
+        // Built after the save, so the timestamps are the ones ApplyAudit just stamped.
+        return new NoteDto(row.Id, row.Body, row.AuthorId, row.CreatedAt, row.UpdatedAt);
+    }
+
+    public async Task<NoteWriteResult> EditSystemNoteAsync(int noteId, string body, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        // Tracked, not AsNoTracking: this is the row being written. The soft-delete query filter applies, so a
+        // deleted note reads as absent.
+        var row = await db.SystemNotes.FirstOrDefaultAsync(n => n.Id == noteId, ct);
+
+        if (row is null)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchNote, null);
+
+        // A same-body edit is a successful no-op that does not bump UpdatedAt, matching SetAnimalNameAsync.
+        if (row.Body != body)
+        {
+            row.Body = body;
+            await db.SaveChangesAsync(ct);
+        }
+
+        return new NoteWriteResult(NoteWriteOutcome.Ok,
+            new NoteDto(row.Id, row.Body, row.AuthorId, row.CreatedAt, row.UpdatedAt));
+    }
+
+    public async Task<NoteWriteResult> DeleteSystemNoteAsync(int noteId, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var row = await db.SystemNotes.FirstOrDefaultAsync(n => n.Id == noteId, ct);
+
+        // The row is already filtered out once deleted, so a second delete is a 404 -- deliberately not idempotent.
+        if (row is null)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchNote, null);
+
+        db.Remove(row);   // ApplyAudit converts this to a DeletedAt stamp
+        await db.SaveChangesAsync(ct);
+
+        return new NoteWriteResult(NoteWriteOutcome.Ok, null);
     }
 
     public async Task AddAlarmHistoryAsync(ApiAlarmStatus status, CancellationToken ct = default)
@@ -330,7 +460,12 @@ public partial class DeviceDataStore(
         return await db.Animals
             .AsNoTracking()
             .OrderBy(a => a.Name).ThenBy(a => a.Identifier)
-            .Select(a => new AnimalDto(a.Identifier, a.Name, a.CreatedAt, a.UpdatedAt))
+            .Select(a => new AnimalDto(a.Id, a.Identifier, a.Name, a.TrainerNotes,
+                db.BehaviorNotes.Where(n => n.AnimalId == a.Id)
+                    .OrderByDescending(n => n.CreatedAt).ThenByDescending(n => n.Id)
+                    .Select(n => new NoteDto(n.Id, n.Body, n.AuthorId, n.CreatedAt, n.UpdatedAt))
+                    .FirstOrDefault(),
+                a.CreatedAt, a.UpdatedAt))
             .ToListAsync(ct);
     }
 
@@ -360,4 +495,117 @@ public partial class DeviceDataStore(
 
         await db.SaveChangesAsync(ct);
     }
+
+    public async Task<PagedResult<NoteDto>?> GetBehaviorNotesAsync(string identifier, SortRequest sort,
+        PageRequest page, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var animalId = await ResolveAnimalIdAsync(db, identifier, ct);
+        if (animalId == 0)
+            return null;
+
+        var q = db.BehaviorNotes.AsNoTracking().Where(n => n.AnimalId == animalId);
+        var total = await q.CountAsync(ct);
+
+        var items = await NoteSort.Apply(q, sort)
+            .Skip(page.Skip).Take(page.PageSize)
+            .Select(n => new NoteDto(n.Id, n.Body, n.AuthorId, n.CreatedAt, n.UpdatedAt))
+            .ToListAsync(ct);
+
+        return new PagedResult<NoteDto>(items, page.Page, page.PageSize, total);
+    }
+
+    public async Task<AnimalNotes> GetAnimalNotesAsync(string identifier, CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var row = await db.Animals.AsNoTracking()
+            .Where(a => a.Identifier == identifier)
+            .Select(a => new { a.Id, a.TrainerNotes })
+            .FirstOrDefaultAsync(ct);
+
+        if (row is null)
+            return AnimalNotes.Empty;
+
+        var note = await db.BehaviorNotes.AsNoTracking()
+            .Where(n => n.AnimalId == row.Id)
+            .OrderByDescending(n => n.CreatedAt).ThenByDescending(n => n.Id)
+            .Select(n => new NoteDto(n.Id, n.Body, n.AuthorId, n.CreatedAt, n.UpdatedAt))
+            .FirstOrDefaultAsync(ct);
+
+        return new AnimalNotes(row.TrainerNotes, note);
+    }
+
+    public async Task<NoteWriteResult> AddBehaviorNoteAsync(string identifier, string body,
+        CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var animalId = await ResolveAnimalIdAsync(db, identifier, ct);
+        if (animalId == 0)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchAnimal, null);
+
+        var row = new Entities.BehaviorNote { AnimalId = animalId, Body = body };
+        db.BehaviorNotes.Add(row);
+        await db.SaveChangesAsync(ct);
+
+        return new NoteWriteResult(NoteWriteOutcome.Ok,
+            new NoteDto(row.Id, row.Body, row.AuthorId, row.CreatedAt, row.UpdatedAt));
+    }
+
+    public async Task<NoteWriteResult> EditBehaviorNoteAsync(string identifier, int noteId, string body,
+        CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var animalId = await ResolveAnimalIdAsync(db, identifier, ct);
+        if (animalId == 0)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchAnimal, null);
+
+        // Scoped to the resolved animal, so a note id belonging to another animal is NoSuchNote rather than an
+        // edit of somebody else's log.
+        var row = await db.BehaviorNotes.FirstOrDefaultAsync(n => n.Id == noteId && n.AnimalId == animalId, ct);
+
+        if (row is null)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchNote, null);
+
+        if (row.Body != body)
+        {
+            row.Body = body;
+            await db.SaveChangesAsync(ct);
+        }
+
+        return new NoteWriteResult(NoteWriteOutcome.Ok,
+            new NoteDto(row.Id, row.Body, row.AuthorId, row.CreatedAt, row.UpdatedAt));
+    }
+
+    public async Task<NoteWriteResult> DeleteBehaviorNoteAsync(string identifier, int noteId,
+        CancellationToken ct = default)
+    {
+        await using var db = await factory.CreateDbContextAsync(ct);
+
+        var animalId = await ResolveAnimalIdAsync(db, identifier, ct);
+        if (animalId == 0)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchAnimal, null);
+
+        var row = await db.BehaviorNotes.FirstOrDefaultAsync(n => n.Id == noteId && n.AnimalId == animalId, ct);
+
+        if (row is null)
+            return new NoteWriteResult(NoteWriteOutcome.NoSuchNote, null);
+
+        db.Remove(row);
+        await db.SaveChangesAsync(ct);
+
+        return new NoteWriteResult(NoteWriteOutcome.Ok, null);
+    }
+
+    // The registry key for an identifier, or 0 when there is no row. The soft-delete query filter hides a
+    // deleted animal, which is the intended "unknown animal" answer. Never creates the row -- a typo'd
+    // identifier must not mint a phantom animal.
+    private static Task<int> ResolveAnimalIdAsync(DeviceDbContext db, string identifier, CancellationToken ct) =>
+        db.Animals.AsNoTracking()
+            .Where(a => a.Identifier == identifier)
+            .Select(a => a.Id)
+            .FirstOrDefaultAsync(ct);
 }

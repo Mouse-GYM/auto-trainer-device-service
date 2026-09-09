@@ -1,5 +1,6 @@
 using AutoTrainer.Api.ApiTypes;
 using AutoTrainer.Api.CommandQueue;
+using AutoTrainer.Api.Contracts;
 using AutoTrainer.Api.Data;
 using AutoTrainer.Api.Data.Stores;
 using AutoTrainer.Api.Hub;
@@ -52,6 +53,12 @@ public partial class AutotrainerDevice
     // memory from reach-status events. _fiveDayId is the animal the running total currently belongs to.
     private FiveDayReachStatus _fiveDay;
     private string? _fiveDayId;
+
+    // Registry notes for the selected animal (surfaced as Animal.TrainerNotes/BehaviorNote). One read per animal,
+    // keyed by identifier so a selection change invalidates it; StampAndBroadcastAnimal is synchronous and on a hot
+    // path, so it must never read the database itself. _animalNotesId is the animal the cached notes belong to.
+    private AnimalNotes _animalNotes = AnimalNotes.Empty;
+    private string? _animalNotesId;
 
     // Day attribution for day*CountChanged events (which carry no day). The attribution day is the newer of the
     // most recent systemStatus DayPath day and the most recent DayStarted day, so a new day's counts are recorded
@@ -115,6 +122,97 @@ public partial class AutotrainerDevice
     public string? WebImagesPath { get; private set; }
 
     public string? LatestWebImage { get; private set; }
+
+    // Loads the values this service owns and no message carries, so a restart does not publish an empty value and
+    // then have it reappear. Called once from Program.cs before any hosted service starts -- nothing else is
+    // touching the device yet, which is why this is the one place model state is set off the update channel.
+    // Sets the value only; nothing is connected this early, and the first real broadcast follows the first
+    // GetConfiguration response anyway.
+    public async Task InitializeAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            Configuration.SystemNote = await _deviceStore.GetLatestSystemNoteAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            // Descriptive text; starting without it beats not starting.
+            LogSystemNotesLoadFailed(ex);
+        }
+    }
+
+    // A note mutation has no api message behind it, so it needs its own way to reach the broadcasts. Queued on
+    // the update channel like every other entry point, so Configuration is still only mutated on the worker.
+    //
+    // NoteChanged carries the mutation's identity and always goes out. The re-read that follows takes no value:
+    // the caller's commit and this enqueue are separate steps, so two overlapping writes can reach the channel
+    // in the opposite order to the commits. Re-reading here means whichever action runs last lands on the
+    // durable value; applying a captured argument would leave the retained model disagreeing with the database
+    // until the next restart. The note that changed may not be the newest one, so SystemConfigurationChanged --
+    // which exists to carry live-model values -- fires only when the newest note actually differs.
+    public void OnSystemNoteChanged(int noteId, NoteChangeKind kind)
+    {
+        _updateChannel.Writer.TryWrite(async () =>
+        {
+            await SendNoteChangedAsync(new NoteChangeDto(NoteScope.System, null, noteId, kind));
+
+            NoteDto? latest;
+
+            try
+            {
+                latest = await _deviceStore.GetLatestSystemNoteAsync();
+            }
+            catch (Exception ex)
+            {
+                // Keep the retained value and broadcast nothing further: a failed read must not blank the note or
+                // publish a value nobody wrote. The notice above has already gone out, which is correct -- the
+                // mutation did commit.
+                LogSystemNotesLoadFailed(ex);
+                return;
+            }
+
+            if (latest == Configuration.SystemNote)
+                return;
+
+            Configuration.SystemNote = latest;
+
+            await _hubContext.Clients.All.SystemConfigurationChanged(Configuration);
+        });
+    }
+
+    // Signals a behavior-note mutation and, when it touched the selected animal, re-reads and re-broadcasts it.
+    // The NoteChanged notice is unconditional -- it is the only path by which a change to a non-selected animal
+    // reaches clients, since AnimalChanged carries the live animal and nothing else.
+    public void OnAnimalNoteChanged(string identifier, int noteId, NoteChangeKind kind)
+    {
+        _updateChannel.Writer.TryWrite(async () =>
+        {
+            await SendNoteChangedAsync(new NoteChangeDto(NoteScope.Behavior, identifier, noteId, kind));
+
+            if (Animal is not { } animal || animal.Identifier != identifier)
+                return;
+
+            var before = _animalNotes.BehaviorNote;
+
+            if (await RefreshAnimalNotesAsync(identifier, force: true) && before != _animalNotes.BehaviorNote)
+                StampAndBroadcastAnimal();
+        });
+    }
+
+    // Best-effort, and isolated: DeviceUpdateWorker catches per queued action, so a faulted send would otherwise
+    // take the store re-read and the live-model update down with it, leaving the retained note stale after a
+    // committed write.
+    private async Task SendNoteChangedAsync(NoteChangeDto change)
+    {
+        try
+        {
+            await _hubContext.Clients.All.NoteChanged(change);
+        }
+        catch (Exception ex)
+        {
+            LogBroadcastNoteChangeFailed(ex);
+        }
+    }
 
     public void OnHeartbeat(ApiHeartBeat heartbeat)
     {
@@ -527,6 +625,7 @@ public partial class AutotrainerDevice
                                 // Seed the running 5-day total for the (possibly new) animal before broadcasting,
                                 // so the single AnimalChanged below already carries ReachStatus5Day.
                                 await RefreshFiveDayAsync(status.Identifier, day: null, currentDayCounts: null);
+                                await RefreshAnimalNotesAsync(status.Identifier);
 
                                 // The selection drives which animal database every lifecycle event is written
                                 // to, so apply it here rather than waiting for the next systemStatus.
@@ -657,7 +756,7 @@ public partial class AutotrainerDevice
                         var config = DeserializeData<ApiSystemConfiguration>(response.Data);
                         if (config != null)
                         {
-                            OnSystemConfigurationChanged(config);
+                            await OnSystemConfigurationChangedAsync(config);
 
                             try
                             {
@@ -681,8 +780,88 @@ public partial class AutotrainerDevice
                         }
                         break;
                     }
+                default:
+                    {
+                        // A behavior setting's response is the only thing that converges the retained model for
+                        // nine of the ten: auto-clamp alone also publishes an event, and nothing schedules a
+                        // systemStatus after a setter, so without this the model stays stale until an unrelated
+                        // snapshot happens to arrive.
+                        if (!IsBehaviorSetting(response.Command))
+                            break;
+
+                        if (DeserializeData<ApiEnabledPayload>(response.Data) is not { } payload)
+                            break;
+
+                        // The response carries the state actually in effect, which is what makes applying it
+                        // directly correct rather than a guess at what the request asked for.
+                        switch (ApplyBehaviorSetting(response.Command, payload.Enabled))
+                        {
+                            case SettingModel.Behavior:
+                                await _hubContext.Clients.All.BehaviorChanged(Behavior);
+                                break;
+                            case SettingModel.PelletDevice:
+                                await _hubContext.Clients.All.PelletDeviceChanged(PelletDevice);
+                                break;
+                        }
+                        break;
+                    }
             }
         });
+    }
+
+    // Which retained model a behavior setting lands on, and therefore which broadcast carries it.
+    private enum SettingModel { Behavior, PelletDevice }
+
+    // The behavior settings occupy 1000-1099 by contract (see ApiCommandKind), which is what makes a range
+    // test safe here and keeps the kind-to-property mapping in exactly one place below.
+    private static bool IsBehaviorSetting(ApiCommandKind command) => (int)command is >= 1000 and < 1100;
+
+    // Applies a successful setting response to the retained model and reports which model changed.
+    //
+    // One switch rather than a lookup table plus a separate apply: a second table over the same ten kinds is
+    // precisely where a setting gets wired to the wrong property, and nothing downstream would notice.
+    private SettingModel? ApplyBehaviorSetting(ApiCommandKind command, bool enabled)
+    {
+        switch (command)
+        {
+            case ApiCommandKind.SetLiveAnalysisEnabled:
+                Behavior.IsLiveAnalysisEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetPelletDeliveryEnabled:
+                Behavior.IsPelletDeliveryEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetPelletCoverEnabled:
+                Behavior.IsPelletCoverEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetIntertrialPelletShiftEnabled:
+                Behavior.IsIntertrialPelletShiftEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetTrianglePelletDistanceDetectionEnabled:
+                Behavior.IsTrianglePelletDistanceDetectionEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetAutoCloseGateOnIntertrialEnabled:
+                Behavior.IsAutoCloseGateOnIntertrialEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetAutoClampEnabled:
+                Behavior.IsAutoClampEnabled = enabled;
+                return SettingModel.Behavior;
+            case ApiCommandKind.SetBatchTrialsEnabled:
+                Behavior.IsBatchTrialsEnabled = enabled;
+                return SettingModel.Behavior;
+
+            // Reported on the pellet device rather than on ApiBehaviorStatus, so these two broadcast differently.
+            case ApiCommandKind.SetHomeOnExcessiveDriftEnabled:
+                PelletDevice.IsHomeOnExcessiveDriftEnabled = enabled;
+                return SettingModel.PelletDevice;
+            case ApiCommandKind.SetTunnelSweepEnabled:
+                PelletDevice.IsTunnelSweepEnabled = enabled;
+                return SettingModel.PelletDevice;
+
+            // In the 1000-1099 range but not a setting this build knows: a newer producer added it.
+            default:
+                LogUnmappedBehaviorSetting(command);
+                return null;
+        }
     }
 
     public void OnDeviceDataPathChanged(string? path)
@@ -910,16 +1089,25 @@ public partial class AutotrainerDevice
             Animal = null;
             _fiveDay = default;
             _fiveDayId = null;
+            _animalNotes = AnimalNotes.Empty;
+            _animalNotesId = null;
         }
 
         StampAndBroadcastAnimal();
     }
 
-    // Stamps the current running 5-day total onto the live Animal (ReachStatus5Day is computed, not part of any
-    // message) and broadcasts it. Every animal broadcast goes through here so ReachStatus5Day is always fresh.
+    // Stamps the values that are computed or stored server-side rather than carried by any message -- the running
+    // 5-day total and the registry notes -- onto the live Animal and broadcasts it. Every animal broadcast goes
+    // through here, so both are always fresh.
     private void StampAndBroadcastAnimal()
     {
-        Animal?.ReachStatus5Day.ApplyStatus(_fiveDay.Total);
+        if (Animal is { } animal)
+        {
+            animal.ReachStatus5Day.ApplyStatus(_fiveDay.Total);
+            animal.TrainerNotes = _animalNotes.TrainerNotes;
+            animal.BehaviorNote = _animalNotes.BehaviorNote;
+        }
+
         _hubContext.Clients.All.AnimalChanged(Animal);
     }
 
@@ -983,6 +1171,46 @@ public partial class AutotrainerDevice
             _fiveDay = _fiveDay with { CurrentDay = _fiveDay.CurrentDay ?? day, CurrentDayCounts = counts };
     }
 
+    // Brings _animalNotes up to date for `identifier`. One database read per animal; `force` re-reads the animal
+    // already cached, which is what a note mutation with no selection change needs. Returns false when the read
+    // threw, so a caller that only re-broadcasts on a real change can tell a failure apart from a note that
+    // legitimately became null.
+    private async Task<bool> RefreshAnimalNotesAsync(string? identifier, bool force = false)
+    {
+        if (string.IsNullOrWhiteSpace(identifier))
+        {
+            _animalNotes = AnimalNotes.Empty;
+            _animalNotesId = null;
+            return true;
+        }
+
+        if (!force && identifier == _animalNotesId)
+            return true;
+
+        try
+        {
+            _animalNotes = await _deviceStore.GetAnimalNotesAsync(identifier);
+        }
+        catch (Exception ex)
+        {
+            LogAnimalNotesLoadFailed(ex, identifier);
+
+            // A selection change must not leave the previous animal's notes on screen -- misattributed free text
+            // is worse than none. A forced re-read of the animal already cached is the *same* animal, so there is
+            // nothing to misattribute and the retained notes stay put; blanking them here would instead publish a
+            // spurious "the note vanished" and poison the cache, since _animalNotesId still matches and no later
+            // non-forced refresh would re-read it.
+            if (identifier != _animalNotesId)
+                _animalNotes = AnimalNotes.Empty;
+
+            _animalNotesId = identifier;
+            return false;
+        }
+
+        _animalNotesId = identifier;
+        return true;
+    }
+
     // Sets a single column, mirroring the store's per-column carry-forward so the in-memory 5-day current-day
     // counts stay identical to the row the store appends for the same event.
     private static ApiReachStatus WithCount(ApiReachStatus s, ReachCountField field, int count) => field switch
@@ -1028,13 +1256,24 @@ public partial class AutotrainerDevice
         IsEnabled = s.IsEnabled
     };
 
-    private void OnSystemConfigurationChanged(ApiSystemConfiguration config)
+    private async Task OnSystemConfigurationChangedAsync(ApiSystemConfiguration config)
     {
         Configuration.ApplyStatus(config);
 
         LogDataLocationUpdated(Configuration.DataLocation);
 
-        _hubContext.Clients.All.SystemConfigurationChanged(config);
+        try
+        {
+            // The retained model, not the api object: SystemNote is service-owned and is not on the api type.
+            await _hubContext.Clients.All.SystemConfigurationChanged(Configuration);
+        }
+        catch (Exception ex)
+        {
+            // Publishing is best-effort; persisting the history row and re-requesting status are not. Awaiting
+            // this send (it was fire-and-forget before the payload became the retained model) would otherwise
+            // let a faulted broadcast skip both of them in the caller.
+            LogBroadcastConfigurationFailed(ex);
+        }
     }
 
     private async Task OnSystemStatusChangedAsync(ApiSystemStatus status)
@@ -1051,6 +1290,7 @@ public partial class AutotrainerDevice
         // rides along fresh. A change to the DayPath day rolls the window here.
         await RefreshFiveDayAsync(status.Animal?.Identifier, dayPathDay,
             status.Animal is { } a ? a.ReachStatusDay : null);
+        await RefreshAnimalNotesAsync(status.Animal?.Identifier);
 
         OnAnimalChanged(status.Animal);
         OnAlarmsChanged(status.Alarms);
@@ -1107,11 +1347,26 @@ public partial class AutotrainerDevice
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to load 5-day reach status for {identifier}")]
     private partial void LogFiveDayLoadFailed(Exception ex, string identifier);
 
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to load stored system notes")]
+    private partial void LogSystemNotesLoadFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to load notes for {identifier}")]
+    private partial void LogAnimalNotesLoadFailed(Exception ex, string identifier);
+
     [LoggerMessage(Level = LogLevel.Information, Message = "Command response {command} {result}")]
     private partial void LogCommandResponse(ApiCommandKind command, ApiCommandRequestResult result);
 
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Behavior setting {command} has no retained model property; the next systemStatus will carry it.")]
+    private partial void LogUnmappedBehaviorSetting(ApiCommandKind command);
+
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist system configuration")]
     private partial void LogPersistConfigurationFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to broadcast the system configuration")]
+    private partial void LogBroadcastConfigurationFailed(Exception ex);
+
+    [LoggerMessage(Level = LogLevel.Error, Message = "Failed to broadcast the note change")]
+    private partial void LogBroadcastNoteChangeFailed(Exception ex);
 
     [LoggerMessage(Level = LogLevel.Error, Message = "Failed to persist alarm history for {alarmId}")]
     private partial void LogPersistAlarmHistoryFailed(Exception ex, ApiAlarmKind alarmId);

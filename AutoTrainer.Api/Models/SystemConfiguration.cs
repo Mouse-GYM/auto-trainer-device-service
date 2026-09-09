@@ -1,4 +1,5 @@
 using AutoTrainer.Api.ApiTypes;
+using AutoTrainer.Api.Contracts;
 
 namespace AutoTrainer.Api.Models;
 
@@ -17,6 +18,11 @@ public class SystemConfiguration
     public string LogLocation { get; set; } = "";
 
     public string InferenceModel { get; set; } = "";
+
+    // Service-owned: the newest entry in the device's system-note log, null when it is empty. No
+    // ApiSystemConfiguration field carries it, so ApplyStatus must leave it alone or every arriving config would
+    // wipe it off the retained instance.
+    public NoteDto? SystemNote { get; set; }
 
     public void ApplyStatus(ApiSystemConfiguration config)
     {

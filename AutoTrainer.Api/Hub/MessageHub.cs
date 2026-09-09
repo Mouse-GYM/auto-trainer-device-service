@@ -1,4 +1,5 @@
 ﻿using AutoTrainer.Api.CommandQueue;
+using AutoTrainer.Api.Contracts;
 using AutoTrainer.Api.Models;
 using AutoTrainer.Api.ApiTypes;
 
@@ -12,7 +13,11 @@ public class HubCommandRequest
 
     public int Nonce { get; set; } = -1;
 
-    public object? Data { get; set; } = null;
+    // The command's request payload, passed through to the producer verbatim. Typed as a map rather than
+    // object so it binds straight to ApiCommandRequest.Data: every command that takes one takes an object
+    // ({enabled: bool} for the 1000-1099 settings, {mode: ...} for the mode setters), and a payload that is
+    // not an object is a malformed request rather than something to forward.
+    public Dictionary<string, object>? Data { get; set; } = null;
 }
 
 public interface IMessageHub
@@ -57,7 +62,11 @@ public interface IMessageHub
 
     Task SessionEnded(SessionEnded session);
 
-    Task SystemConfigurationChanged(ApiSystemConfiguration config);
+    Task SystemConfigurationChanged(SystemConfiguration config);
+
+    // Identity only: which log, which animal, which note, what happened. Fires for every note mutation,
+    // including one to an animal that is not selected -- which no live-model broadcast can reach.
+    Task NoteChanged(NoteChangeDto change);
 
     Task DeviceDataPath(string? path);
 
@@ -72,7 +81,10 @@ public class MessageHub : Hub<IMessageHub>
 {
     public async Task RequestCommand(HubCommandRequest request, ICommandTaskQueue queue)
     {
-        await queue.EnqueueAsync(new ApiCommandRequest(request.Command, request.CustomCommand, request.Nonce, null));
+        // Data is forwarded, not dropped: the producer answers FAILED ("requires data") for any command whose
+        // payload is absent, so a null here makes every setting and mode command unusable through this ingress.
+        await queue.EnqueueAsync(
+            new ApiCommandRequest(request.Command, request.CustomCommand, request.Nonce, request.Data));
 
         await Clients.All.CommandRequested(request);
     }

@@ -91,6 +91,10 @@ catch (Exception ex)
     return 1;
 }
 
+// Device-owned values come from the database, not from a message. Load them before app.Run() starts any
+// hosted service, so the first SystemConfigurationChanged already carries them.
+await app.Services.GetRequiredService<AutotrainerDevice>().InitializeAsync();
+
 app.Use(async (context, next) =>
 {
     if (context.Request.Headers.ContainsKey("Access-Control-Request-Private-Network"))

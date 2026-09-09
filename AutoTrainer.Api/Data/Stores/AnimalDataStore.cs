@@ -714,6 +714,10 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
         if (history is null && total is null && day is null)
             return null;
 
+        // Notes live in the device registry, not this animal's database. Read after the presence check above, so a
+        // notes-only registry row does not resurrect a detail response for an animal with no data of its own.
+        var notes = await deviceStore.GetAnimalNotesAsync(identifier, ct);
+
         // Rolling 5-day total from the day table (aggregate -> null Day, like the total snapshot). Null when
         // there are no day rows to sum.
         var five = await ComputeFiveDayReachStatusAsync(db, null, ct);
@@ -725,6 +729,8 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
         return new AnimalDetailDto(
             identifier,
             history?.Name ?? "",
+            notes.TrainerNotes,
+            notes.BehaviorNote,
             history?.DcsSendX ?? 0,
             history?.DcsSendY ?? 0,
             history?.DcsSendZ ?? 0,

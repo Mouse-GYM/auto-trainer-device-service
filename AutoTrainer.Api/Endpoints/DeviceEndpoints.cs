@@ -1,4 +1,5 @@
 using AutoTrainer.Api.ApiTypes;
+using AutoTrainer.Api.Contracts;
 using AutoTrainer.Api.Data.Stores;
 using AutoTrainer.Api.Models;
 
@@ -16,6 +17,11 @@ public static class DeviceEndpoints
         device.MapGet("/detectors", GetDetectors);
         device.MapGet("/emergencies", GetEmergencies);
         device.MapGet("/events", GetApiEventHistory);
+        // The :int constraint means a non-numeric id fails at routing rather than at binding.
+        device.MapGet("/systemnotes", GetSystemNotes);
+        device.MapPost("/systemnotes", CreateSystemNote);
+        device.MapPatch("/systemnotes/{noteId:int}", EditSystemNote);
+        device.MapDelete("/systemnotes/{noteId:int}", DeleteSystemNote);
 
         return app;
     }
@@ -114,6 +120,63 @@ public static class DeviceEndpoints
 
         _ = PageRequest.From(page, pageSize);
         return TypedResults.NotFound("ApiEvent history is not yet persisted.");
+    }
+
+    internal static async Task<IResult> GetSystemNotes(string? sort, int? page, int? pageSize,
+        IDeviceDataStore store, CancellationToken ct)
+    {
+        var sortReq = SortRequest.From(sort);
+        if (!NoteSort.IsSupported(sortReq))
+            return TypedResults.BadRequest($"Unsupported sort field '{sortReq.Field}'. Supported: {NoteSort.CreatedAt}.");
+
+        var pr = PageRequest.From(page, pageSize);
+        var result = await store.GetSystemNotesAsync(sortReq, pr, ct);
+        return TypedResults.Ok(result);
+    }
+
+    internal static async Task<IResult> CreateSystemNote(NoteWrite? write, IDeviceDataStore store,
+        AutotrainerDevice device, CancellationToken ct)
+    {
+        if (!NotesText.TryAccept(write?.Body, out var body, out var err))
+            return TypedResults.BadRequest(err);
+
+        var note = await store.AddSystemNoteAsync(body, ct);
+
+        // After the awaited write: the queued action re-reads the store, so enqueueing it first would race
+        // the commit.
+        device.OnSystemNoteChanged(note.Id, NoteChangeKind.Created);
+
+        return TypedResults.Created($"/device/systemnotes/{note.Id}", note);
+    }
+
+    internal static async Task<IResult> EditSystemNote(int noteId, NoteWrite? write, IDeviceDataStore store,
+        AutotrainerDevice device, CancellationToken ct)
+    {
+        if (!NotesText.TryAccept(write?.Body, out var body, out var err))
+            return TypedResults.BadRequest(err);
+
+        var result = await store.EditSystemNoteAsync(noteId, body, ct);
+
+        if (result.Outcome == NoteWriteOutcome.NoSuchNote)
+            return TypedResults.NotFound($"No system note {noteId}.");
+
+        device.OnSystemNoteChanged(result.Note!.Id, NoteChangeKind.Edited);
+
+        return TypedResults.Ok(result.Note);
+    }
+
+    internal static async Task<IResult> DeleteSystemNote(int noteId, IDeviceDataStore store,
+        AutotrainerDevice device, CancellationToken ct)
+    {
+        var result = await store.DeleteSystemNoteAsync(noteId, ct);
+
+        if (result.Outcome == NoteWriteOutcome.NoSuchNote)
+            return TypedResults.NotFound($"No system note {noteId}.");
+
+        // The route value: a successful delete returns no note to read an id from.
+        device.OnSystemNoteChanged(noteId, NoteChangeKind.Deleted);
+
+        return TypedResults.NoContent();
     }
 
     private static IResult GetLatestCageImage(AutotrainerDevice device)

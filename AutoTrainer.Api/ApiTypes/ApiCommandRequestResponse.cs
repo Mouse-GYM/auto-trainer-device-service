@@ -1,5 +1,15 @@
 namespace AutoTrainer.Api.ApiTypes;
 
+// The response Data of every 1000-1099 behavior setting: the state actually in effect after the attempt.
+//
+// Deliberately not ApiIsEnabledPayload, which carries "isEnabled" and belongs to the *events*
+// (AutoClampEnabledChanged and friends). The command response spells the same idea "enabled", so one type
+// cannot serve both.
+public class ApiEnabledPayload
+{
+    public bool Enabled { get; set; }
+}
+
 public readonly record struct ApiCommandRequestResponse
 {
     public ApiCommandKind Command { get; init; }

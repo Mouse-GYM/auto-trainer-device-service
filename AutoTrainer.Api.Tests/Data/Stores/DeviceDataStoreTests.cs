@@ -182,9 +182,23 @@ public class DeviceDataStoreTests
             Assert.Equal(2, animals.Count);
             Assert.Equal("Alpha", animals[0].Name);
             Assert.Equal("id-a", animals[0].Identifier);
+            Assert.NotEqual(0, animals[0].Id);
             Assert.NotEqual(default, animals[0].FirstSeen);
             Assert.NotEqual(default, animals[0].LastUpdated);
         }
+    }
+
+    [Fact]
+    public async Task Initialize_RunsTheMigration_AndLeavesTheStoreUsable()
+    {
+        using var factory = new TestDeviceDbContextFactory();
+        var store = new DeviceDataStore(factory, NullLogger<DeviceDataStore>.Instance);
+
+        await store.InitializeAsync();
+        await store.InitializeAsync();   // idempotent: migrating an already-migrated database is a no-op
+
+        await store.SetAnimalNameAsync("id-a", "Alpha");
+        Assert.Single(await store.GetAnimalsAsync());
     }
 
     [Fact]

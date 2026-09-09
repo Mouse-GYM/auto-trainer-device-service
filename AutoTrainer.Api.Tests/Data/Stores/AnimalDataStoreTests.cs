@@ -920,6 +920,58 @@ public class AnimalDataStoreTests : IDisposable
         Assert.Null(detail.ReachStatus5Day);
     }
 
+    // Sets the TrainerNotes column directly and appends one behavior note, which is what the detail read joins.
+    private async Task SetRegistryNotesAsync(string identifier, string trainer, string behavior)
+    {
+        using var db = DeviceDb();
+        var row = db.Animals.Single(a => a.Identifier == identifier);
+        row.TrainerNotes = trainer;
+        db.BehaviorNotes.Add(new AutoTrainer.Api.Data.Entities.BehaviorNote { AnimalId = row.Id, Body = behavior });
+        await db.SaveChangesAsync();
+    }
+
+    [Fact]
+    public async Task GetAnimalDetail_CarriesNotesFromDeviceRegistry()
+    {
+        // AddAnimalHistoryAsync creates the registry row via SetAnimalNameAsync.
+        await _store.AddAnimalHistoryAsync(new ApiAnimalStatus { Identifier = "m", Name = "Whiskers" });
+        await SetRegistryNotesAsync("m", "prefers left paw", "skittish after 16:00");
+
+        var detail = await _store.GetAnimalDetailAsync("m");
+
+        Assert.Equal("prefers left paw", detail!.TrainerNotes);
+        Assert.Equal("skittish after 16:00", detail.BehaviorNote!.Body);
+    }
+
+    [Fact]
+    public async Task GetAnimalDetail_NotesOnlyRegistryRow_StillReturnsNull()
+    {
+        // The animal's own database exists but holds no history or reach-status rows.
+        Assert.True(await _store.EnsureAnimalDatabaseAsync("m"));
+        await SetRegistryNotesAsync("m", "prefers left paw", "skittish after 16:00");
+
+        // The cross-store notes read sits after the presence check, so notes alone cannot resurrect a detail.
+        Assert.Null(await _store.GetAnimalDetailAsync("m"));
+    }
+
+    [Fact]
+    public async Task GetAnimalDetail_NoRegistryRow_NotesAreEmpty()
+    {
+        await _store.AddAnimalHistoryAsync(new ApiAnimalStatus { Identifier = "m", Name = "W" });
+
+        using (var db = DeviceDb())
+        {
+            db.Animals.RemoveRange(db.Animals.ToList());
+            await db.SaveChangesAsync();
+        }
+
+        var detail = await _store.GetAnimalDetailAsync("m");
+
+        Assert.NotNull(detail);
+        Assert.Equal("", detail.TrainerNotes);
+        Assert.Null(detail.BehaviorNote);
+    }
+
     public void Dispose()
     {
         _deviceFactory.Dispose();

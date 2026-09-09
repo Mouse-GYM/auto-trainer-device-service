@@ -1,4 +1,5 @@
 using AutoTrainer.Api.ApiTypes;
+using AutoTrainer.Api.Contracts;
 
 namespace AutoTrainer.Api.Models;
 
@@ -50,6 +51,13 @@ public class Animal
     // Rolling total of the last 5 calendar days from the ReachStatusDay table. Computed server-side (never in a
     // zeromq message), so it is populated/maintained outside ApplyStatus and left untouched here.
     public ReachStatus ReachStatus5Day { get; } = new();
+
+    // Service-owned free text from the device registry (never in a zeromq message). Stamped in
+    // StampAndBroadcastAnimal like ReachStatus5Day, so ApplyStatus must leave both untouched.
+    public string TrainerNotes { get; set; } = "";
+
+    // The newest entry in this animal's behavior-note log; null when the log is empty.
+    public NoteDto? BehaviorNote { get; set; }
 
     public void ApplyStatus(ApiAnimalStatus status)
     {

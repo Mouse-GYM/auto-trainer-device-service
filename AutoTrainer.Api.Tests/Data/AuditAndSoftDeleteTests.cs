@@ -75,5 +75,37 @@ public class AuditAndSoftDeleteTests : IDisposable
         }
     }
 
+    // A deleted note is what the note log's DELETE writes, so this pins the behaviour the store relies on:
+    // Remove leaves the row in place with DeletedAt stamped, and every unfiltered read stops seeing it.
+    [Fact]
+    public void SystemNote_Remove_SoftDeletes_AndIsFilteredOut()
+    {
+        DateTime created;
+
+        using (var db = NewContext())
+        {
+            var row = new SystemNote { Body = "bench 3, left rack" };
+            db.SystemNotes.Add(row);
+            db.SaveChanges();
+            created = row.CreatedAt;
+        }
+
+        using (var db = NewContext())
+        {
+            db.SystemNotes.Remove(db.SystemNotes.Single());
+            db.SaveChanges();
+        }
+
+        using (var db = NewContext())
+        {
+            Assert.Empty(db.SystemNotes.ToList());
+
+            var row = Assert.Single(db.SystemNotes.IgnoreQueryFilters().ToList());
+            Assert.NotNull(row.DeletedAt);
+            Assert.True(row.UpdatedAt >= created);
+            Assert.Equal("bench 3, left rack", row.Body);
+        }
+    }
+
     public void Dispose() => _connection.Dispose();
 }

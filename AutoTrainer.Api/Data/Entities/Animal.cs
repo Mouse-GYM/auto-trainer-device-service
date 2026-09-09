@@ -7,4 +7,5 @@ public class Animal : SoftDeleteEntity
 {
     public string Identifier { get; set; } = "";
     public string Name { get; set; } = "";
+    public string TrainerNotes { get; set; } = "";
 }

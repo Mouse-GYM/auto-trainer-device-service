@@ -11,6 +11,8 @@ public class DeviceDbContext : AppDbContext
     public DbSet<AlarmHistory> AlarmHistory => Set<AlarmHistory>();
     public DbSet<EmergencyStopHistory> EmergencyStopHistory => Set<EmergencyStopHistory>();
     public DbSet<Animal> Animals => Set<Animal>();
+    public DbSet<SystemNote> SystemNotes => Set<SystemNote>();
+    public DbSet<BehaviorNote> BehaviorNotes => Set<BehaviorNote>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -38,6 +40,22 @@ public class DeviceDbContext : AppDbContext
             e.ToTable("Animal");
             e.Property(x => x.Identifier).IsRequired();
             e.HasIndex(x => x.Identifier).IsUnique();
+        });
+
+        modelBuilder.Entity<SystemNote>(e =>
+        {
+            e.ToTable("SystemNote");
+            e.Property(x => x.Body).IsRequired();
+            e.HasIndex(x => x.CreatedAt);   // the log is always read in time order
+        });
+
+        modelBuilder.Entity<BehaviorNote>(e =>
+        {
+            e.ToTable("BehaviorNote");
+            e.Property(x => x.Body).IsRequired();
+            e.HasOne<Animal>().WithMany().HasForeignKey(x => x.AnimalId).IsRequired();
+            // Every read is scoped to one animal, so the composite index is the only one needed.
+            e.HasIndex(x => new { x.AnimalId, x.CreatedAt });
         });
 
         base.OnModelCreating(modelBuilder); // applies soft-delete filters last

@@ -36,6 +36,35 @@ public class DtoSerializationTests
         Assert.Contains("\"batchId\":", json);
     }
 
+    // WrittenAt/EditedAt are the row's CreatedAt/UpdatedAt renamed, so the audit columns must not reach the wire
+    // under their own names.
+    [Fact]
+    public void NoteDto_ExposesWrittenAndEditedAt_DropsAuditColumns()
+    {
+        var json = JsonSerializer.Serialize(
+            new NoteDto(1, "bench 3, left rack", null, DateTime.UtcNow, DateTime.UtcNow), JsonDefaults.CamelCase);
+
+        Assert.Contains("\"writtenAt\":", json);
+        Assert.Contains("\"editedAt\":", json);
+        Assert.Contains("\"authorId\":null", json);
+        Assert.DoesNotContain("createdAt", json);
+        Assert.DoesNotContain("updatedAt", json);
+        Assert.DoesNotContain("deletedAt", json);
+    }
+
+    // Clients switch on these, so the numeric encoding is part of the contract.
+    [Fact]
+    public void NoteChangeDto_SerializesEnumsAsNumbers()
+    {
+        var json = JsonSerializer.Serialize(
+            new NoteChangeDto(NoteScope.Behavior, "mouse-1", 7, NoteChangeKind.Deleted), JsonDefaults.CamelCase);
+
+        Assert.Contains("\"scope\":1", json);
+        Assert.Contains("\"kind\":2", json);
+        Assert.Contains("\"animalIdentifier\":\"mouse-1\"", json);
+        Assert.Contains("\"noteId\":7", json);
+    }
+
     [Fact]
     public void PagedResult_ExposesEnvelopeMetadata()
     {

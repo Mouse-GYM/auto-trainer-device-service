@@ -32,6 +32,10 @@ public class AutotrainerDeviceAnimalEventTests
         var deviceStore = new Mock<IDeviceDataStore>();
         var animalStore = new Mock<IAnimalDataStore>();
 
+        // Every animal selection refreshes the notes cache; an unstubbed Task<AnimalNotes> completes with null.
+        deviceStore.Setup(s => s.GetAnimalNotesAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(AnimalNotes.Empty);
+
         var device = new AutotrainerDevice(
             queue.Object, hub.Object, NullLogger<AutotrainerDevice>.Instance,
             deviceStore.Object, animalStore.Object);
