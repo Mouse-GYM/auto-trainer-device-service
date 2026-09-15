@@ -56,7 +56,9 @@ public interface IMessageHub
 
     Task BehaviorChanged(Behavior behavior);
 
-    Task ReachEventsChanged(List<ReachEvent> reachEvents);
+    // One trial's whole intertrial analysis, straight off the intertrialResponse event -- the reaches plus the
+    // hand and other event lists and the trial's analysis scalars.
+    Task IntertrialResultChanged(IntertrialResultDto result);
 
     Task AnimalChanged(Animal? animal);
 

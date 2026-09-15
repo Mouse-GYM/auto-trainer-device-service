@@ -10,7 +10,6 @@ public class SessionExpandTests
     {
         Assert.True(SessionExpand.TryParse(null, out var e, out _));
         Assert.False(e.Trials);
-        Assert.False(e.TrialsReaches);
         Assert.False(e.Batches);
     }
 
@@ -19,15 +18,15 @@ public class SessionExpandTests
     {
         Assert.True(SessionExpand.TryParse("trials", out var e, out _));
         Assert.True(e.Trials);
-        Assert.False(e.TrialsReaches);
+        Assert.False(e.Batches);
     }
 
     [Fact]
-    public void TrialsReaches_ImpliesTrials()
+    public void TrialsRightHandReaches_ImpliesTrials()
     {
-        Assert.True(SessionExpand.TryParse("trials.reaches", out var e, out _));
+        Assert.True(SessionExpand.TryParse("trials.rightHandReaches", out var e, out _));
         Assert.True(e.Trials);
-        Assert.True(e.TrialsReaches);
+        Assert.True(e.TrialsRightHandReaches);
     }
 
     [Fact]
@@ -36,7 +35,6 @@ public class SessionExpandTests
         Assert.True(SessionExpand.TryParse("trials, batches", out var e, out _));
         Assert.True(e.Trials);
         Assert.True(e.Batches);
-        Assert.False(e.TrialsReaches);
     }
 
     [Fact]

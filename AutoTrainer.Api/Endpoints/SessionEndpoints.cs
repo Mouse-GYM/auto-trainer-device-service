@@ -86,8 +86,8 @@ public static class SessionEndpoints
     }
 
     internal static async Task<IResult> GetTrials(string sessionId, string? animal, bool? analysisPerformed,
-        int[]? reachMethod, int[]? reachOutcome, string? sort, int? page, int? pageSize, AutotrainerDevice device,
-        IAnimalDataStore store, ISqliteStorage storage, CancellationToken ct)
+        string? sort, int? page, int? pageSize, AutotrainerDevice device, IAnimalDataStore store,
+        ISqliteStorage storage, CancellationToken ct)
     {
         var sortReq = SortRequest.From(sort);
         if (!TrialSort.IsSupported(sortReq))
@@ -99,21 +99,20 @@ public static class SessionEndpoints
         if (res.Error is { } error) return error;
         if (res.Empty) return TypedResults.Ok(PagedResult<TrialDto>.Empty(pr.Page, pr.PageSize));
 
-        var filter = new TrialFilter(analysisPerformed, reachMethod ?? [], reachOutcome ?? []);
+        var filter = new TrialFilter(analysisPerformed);
         var result = await store.GetTrialsAsync(res.Identifier!, sessionId, filter, sortReq, pr, ct);
         return TypedResults.Ok(result);
     }
 
-    // Count analogue of GetTrials: same filters (animal, analysisPerformed, reachMethod, reachOutcome), no sort/paging.
+    // Count analogue of GetTrials: same filters (animal, analysisPerformed), no sort/paging.
     internal static async Task<IResult> GetTrialsCount(string sessionId, string? animal, bool? analysisPerformed,
-        int[]? reachMethod, int[]? reachOutcome, AutotrainerDevice device, IAnimalDataStore store,
-        ISqliteStorage storage, CancellationToken ct)
+        AutotrainerDevice device, IAnimalDataStore store, ISqliteStorage storage, CancellationToken ct)
     {
         var res = AnimalResolution.Resolve(animal, device.Animal?.Identifier, storage);
         if (res.Error is { } error) return error;
         if (res.Empty) return TypedResults.Ok(new CountDto(0));
 
-        var filter = new TrialFilter(analysisPerformed, reachMethod ?? [], reachOutcome ?? []);
+        var filter = new TrialFilter(analysisPerformed);
         var count = await store.CountTrialsAsync(res.Identifier!, sessionId, filter, ct);
         return TypedResults.Ok(new CountDto(count));
     }
@@ -121,16 +120,17 @@ public static class SessionEndpoints
     internal static async Task<IResult> GetTrial(string sessionId, int trialId, string? animal, string? expand,
         AutotrainerDevice device, IAnimalDataStore store, ISqliteStorage storage, CancellationToken ct)
     {
-        // The only recognized expand token here is `reaches`.
-        var expandReaches = false;
+        // The only recognized expand token here is `rightHandReaches`; every other reach list a trial could
+        // have belongs to the reach endpoints.
+        var expandRightHandReaches = false;
         if (!string.IsNullOrWhiteSpace(expand))
         {
             foreach (var token in expand.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
-                if (string.Equals(token, "reaches", StringComparison.OrdinalIgnoreCase))
-                    expandReaches = true;
+                if (string.Equals(token, "rightHandReaches", StringComparison.OrdinalIgnoreCase))
+                    expandRightHandReaches = true;
                 else
-                    return TypedResults.BadRequest($"Unknown expand token '{token}'. Valid: reaches.");
+                    return TypedResults.BadRequest($"Unknown expand token '{token}'. Valid: rightHandReaches.");
             }
         }
 
@@ -138,7 +138,7 @@ public static class SessionEndpoints
         if (res.Error is { } error) return error;
         if (res.Empty) return TypedResults.NotFound();
 
-        var trial = await store.GetTrialAsync(res.Identifier!, sessionId, trialId, expandReaches, ct);
+        var trial = await store.GetTrialAsync(res.Identifier!, sessionId, trialId, expandRightHandReaches, ct);
         return trial is null ? TypedResults.NotFound() : TypedResults.Ok(trial);
     }
 

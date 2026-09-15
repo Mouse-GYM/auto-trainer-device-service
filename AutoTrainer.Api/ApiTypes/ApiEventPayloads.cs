@@ -375,7 +375,7 @@ public static class ReachEventMethod
     public const string LeftHand = "left_hand";
     public const string Tongue = "tongue";
 
-    // Stable integer codes for persistence (ReachEvent.Method).
+    // Stable integer codes for persistence (ReachEventBase.Method).
     public static int ToCode(string method) => method switch
     {
         Other => 1,
@@ -384,6 +384,10 @@ public static class ReachEventMethod
         Tongue => 4,
         _ => 0
     };
+
+    // ToCode(RightHand) as a compile-time constant. An unqualified "reach" means a right-hand hand event, so
+    // this code appears inside EF expression trees, where the call above cannot be translated to SQL.
+    public const int RightHandCode = 2;
 }
 
 public static class ReachEventOutcome
@@ -409,12 +413,15 @@ public static class ReachEventOutcome
 
 // IntertrialResponseDict — from autotrainer.inference.analysis.IntertrialResponse.
 // RhMaxVpList entries are (x, y, z) relative offsets, each null when the offset could not be determined.
+// ReachEvents is the hand reaches (right and left); HandEvents is hand-based events that are not reaches;
+// OtherEvents is everything not hand-based. The three are disjoint.
 // The source type also carries a deprecated pellets_presented that rides over the wire and is not mirrored.
 public class IntertrialResponse
 {
     public List<List<double>?> RhMaxVpList { get; set; } = [];
     public List<ReachEvent> ReachEvents { get; set; } = [];
     public List<ReachEvent> OtherEvents { get; set; } = [];
+    public List<ReachEvent> HandEvents { get; set; } = [];
     public int FoodConsumed { get; set; }
     public int SuccessfulReaches { get; set; }
     public int TotalReaches { get; set; }

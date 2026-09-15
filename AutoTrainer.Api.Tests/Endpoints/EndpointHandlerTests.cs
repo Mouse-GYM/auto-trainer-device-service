@@ -59,7 +59,16 @@ public class EndpointHandlerTests
     {
         // Sort validation runs before any resolution/store access, so the collaborators are never touched.
         var result = await SessionEndpoints.GetTrials("session", animal: null, analysisPerformed: null,
-            reachMethod: null, reachOutcome: null, sort: "bogus", page: null, pageSize: null,
+            sort: "bogus", page: null, pageSize: null,
+            device: null!, store: null!, storage: null!, ct: CancellationToken.None);
+        Assert.IsType<BadRequest<string>>(result);
+    }
+
+    [Fact]
+    public async Task GetTrial_UnknownExpandToken_Returns400()
+    {
+        // Expand parsing runs before any resolution/store access, so the collaborators are never touched.
+        var result = await SessionEndpoints.GetTrial("session", trialId: 1, animal: null, expand: "bogus",
             device: null!, store: null!, storage: null!, ct: CancellationToken.None);
         Assert.IsType<BadRequest<string>>(result);
     }
@@ -74,9 +83,43 @@ public class EndpointHandlerTests
     }
 
     [Fact]
-    public async Task GetReachesCount_BadWindow_Returns400()
+    public async Task GetRawReachesCount_BadWindow_Returns400()
     {
-        var result = await ReachEndpoints.GetReachesCount(within: "banana", animal: null, method: null,
+        var result = await ReachEndpoints.GetRawReachesCount(within: "banana", animal: null, method: null,
+            outcome: null, device: null!, store: null!, storage: null!, ct: CancellationToken.None);
+        Assert.IsType<BadRequest<string>>(result);
+    }
+
+    [Fact]
+    public async Task GetHandReaches_BadWindow_Returns400()
+    {
+        var result = await ReachEndpoints.GetHandReaches(within: "banana", animal: null, method: null,
+            outcome: null, page: null, pageSize: null, device: null!, store: null!, storage: null!,
+            ct: CancellationToken.None);
+        Assert.IsType<BadRequest<string>>(result);
+    }
+
+    [Fact]
+    public async Task GetHandReachesCount_BadWindow_Returns400()
+    {
+        var result = await ReachEndpoints.GetHandReachesCount(within: "banana", animal: null, method: null,
+            outcome: null, device: null!, store: null!, storage: null!, ct: CancellationToken.None);
+        Assert.IsType<BadRequest<string>>(result);
+    }
+
+    [Fact]
+    public async Task GetOtherReaches_BadWindow_Returns400()
+    {
+        var result = await ReachEndpoints.GetOtherReaches(within: "banana", animal: null, method: null,
+            outcome: null, page: null, pageSize: null, device: null!, store: null!, storage: null!,
+            ct: CancellationToken.None);
+        Assert.IsType<BadRequest<string>>(result);
+    }
+
+    [Fact]
+    public async Task GetOtherReachesCount_BadWindow_Returns400()
+    {
+        var result = await ReachEndpoints.GetOtherReachesCount(within: "banana", animal: null, method: null,
             outcome: null, device: null!, store: null!, storage: null!, ct: CancellationToken.None);
         Assert.IsType<BadRequest<string>>(result);
     }

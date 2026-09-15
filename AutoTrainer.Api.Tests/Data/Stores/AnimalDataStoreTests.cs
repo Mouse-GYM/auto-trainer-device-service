@@ -254,45 +254,122 @@ public class AnimalDataStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task ReachEvents_RedeliveryReplacesByTrial_AndSoftDeletesTheOldRows()
+    public async Task IntertrialResult_RedeliveryReplacesByTrial_AndHardDeletesTheOldRows()
     {
-        ReachEvent Reach(int init) => new()
-        {
-            Init = init,
-            End = init + 1,
-            Max = init,
-            Method = ReachEventMethod.RightHand,
-            Outcome = ReachEventOutcome.Eaten,
-            DelaySincePresented = 0.5
-        };
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten),
+                      Reach(2, ReachEventMethod.RightHand, ReachEventOutcome.Eaten),
+                      Reach(3, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)],
+                hand: [Reach(4, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)],
+                other: [Reach(5, ReachEventMethod.Tongue, ReachEventOutcome.Stalled)],
+                food: 1));
 
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, BatchA,
-            [Reach(1), Reach(2), Reach(3)]);
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, BatchA, [Reach(9)]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA,
+            Response([Reach(9, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)],
+                hand: [Reach(8, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)],
+                other: [Reach(7, ReachEventMethod.Tongue, ReachEventOutcome.Stalled)],
+                food: 2));
 
         using var db = Db("m");
 
-        var visible = db.ReachEvents.ToList();
-        Assert.Equal(9, Assert.Single(visible).FirstFrame);
-        Assert.Equal(2, visible[0].Method);     // right_hand
-        Assert.Equal(5, visible[0].Outcome);    // eaten
+        // Nothing from the first write survives -- not even as a tombstone. A Remove() creeping back in place
+        // of ExecuteDeleteAsync would leave four rows here instead of one.
+        var results = db.IntertrialResults.IgnoreQueryFilters().ToList();
+        Assert.Equal(2, Assert.Single(results).FoodConsumed);
 
-        var all = db.ReachEvents.IgnoreQueryFilters().ToList();
-        Assert.Equal(4, all.Count);
-        Assert.Equal(3, all.Count(r => r.DeletedAt != null));
-        Assert.All(all.Where(r => r.DeletedAt != null), r => Assert.Contains(r.FirstFrame, new[] { 1, 2, 3 }));
+        var reaches = db.RawReachEvents.IgnoreQueryFilters().ToList();
+        Assert.Equal(9, Assert.Single(reaches).FirstFrame);
+        Assert.Equal(2, reaches[0].Method);     // right_hand
+        Assert.Equal(5, reaches[0].Outcome);    // eaten
+
+        Assert.Equal(8, Assert.Single(db.HandReachEvents.IgnoreQueryFilters().ToList()).FirstFrame);
+        Assert.Equal(7, Assert.Single(db.OtherReachEvents.IgnoreQueryFilters().ToList()).FirstFrame);
     }
 
     [Fact]
-    public async Task ReachEvents_EmptyListStillReplaces()
+    public async Task IntertrialResult_ReplacingASoftDeletedResult_Succeeds()
     {
-        ReachEvent Reach(int init) => new() { Init = init, Method = ReachEventMethod.Tongue, Outcome = ReachEventOutcome.Missed };
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]));
 
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, null, [Reach(1)]);
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, null, []);
+        // A delete through the context is a soft delete, and the unique index on TrialId still counts the
+        // tombstone -- so the replacement below only works because the store ignores query filters when it
+        // looks for the row to hard-delete.
+        using (var db = Db("m"))
+        {
+            db.IntertrialResults.Remove(db.IntertrialResults.Single());
+            db.SaveChanges();
+            Assert.NotNull(db.IntertrialResults.IgnoreQueryFilters().Single().DeletedAt);
+        }
+
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([Reach(9, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)], food: 3));
+
+        using (var db = Db("m"))
+        {
+            Assert.Equal(3, Assert.Single(db.IntertrialResults.IgnoreQueryFilters().ToList()).FoodConsumed);
+            Assert.Equal(9, Assert.Single(db.RawReachEvents.ToList()).FirstFrame);
+        }
+    }
+
+    [Fact]
+    public async Task IntertrialResult_EmptyListsStillReplace()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([Reach(1, ReachEventMethod.Tongue, ReachEventOutcome.Missed)],
+                hand: [Reach(2, ReachEventMethod.Tongue, ReachEventOutcome.Missed)],
+                other: [Reach(3, ReachEventMethod.Tongue, ReachEventOutcome.Missed)]));
+
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null, Response([]));
 
         using var db = Db("m");
-        Assert.Empty(db.ReachEvents.ToList());
+        Assert.Single(db.IntertrialResults.ToList());
+        Assert.Empty(db.RawReachEvents.ToList());
+        Assert.Empty(db.HandReachEvents.ToList());
+        Assert.Empty(db.OtherReachEvents.ToList());
+    }
+
+    [Fact]
+    public async Task IntertrialResult_LinksTrialSessionAndBatch()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 4, BatchA,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]));
+
+        using var db = Db("m");
+
+        var trial = db.Trials.Single();
+        var result = db.IntertrialResults.Single();
+
+        Assert.Equal(trial.Id, result.TrialId);
+        Assert.Equal(4, trial.Identifier);
+        Assert.Equal(db.Sessions.Single().Id, trial.SessionId);
+        Assert.Equal(db.BatchAnalyses.Single().Id, trial.BatchAnalysisId);
+        Assert.Equal(result.Id, db.RawReachEvents.Single().IntertrialResultId);
+        Assert.Equal(trial.Id, db.RawReachEvents.Single().TrialId);
+    }
+
+    [Fact]
+    public async Task IntertrialResult_WithNoBatch_Persists()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)],
+                hand: [Reach(2, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)],
+                other: [Reach(3, ReachEventMethod.Tongue, ReachEventOutcome.Stalled)],
+                food: 7));
+
+        using var db = Db("m");
+
+        Assert.Empty(db.BatchAnalyses.ToList());
+        Assert.Null(db.Trials.Single().BatchAnalysisId);
+
+        var result = db.IntertrialResults.Single();
+        Assert.Equal(7, result.FoodConsumed);
+        Assert.Equal(1, result.SuccessfulReaches);
+        Assert.Equal(1, result.TotalReaches);
+        Assert.Equal("[[1,2,3]]", result.RhMaxVpList);
+        Assert.Single(db.RawReachEvents.ToList());
+        Assert.Single(db.HandReachEvents.ToList());
+        Assert.Single(db.OtherReachEvents.ToList());
     }
 
     [Fact]
@@ -607,54 +684,127 @@ public class AnimalDataStoreTests : IDisposable
         DelaySincePresented = 0.5
     };
 
+    // The scalars default to the reach list's own size so a test that only cares about the rows does not have
+    // to state them; RhMaxVpList is a fixed sentinel, since nothing interprets it.
+    private static IntertrialResponse Response(List<ReachEvent> reaches, List<ReachEvent>? hand = null,
+        List<ReachEvent>? other = null, int food = 0) => new()
+        {
+            RhMaxVpList = [[1, 2, 3]],
+            ReachEvents = reaches,
+            HandEvents = hand ?? [],
+            OtherEvents = other ?? [],
+            FoodConsumed = food,
+            SuccessfulReaches = reaches.Count(r => r.Outcome == ReachEventOutcome.Eaten),
+            TotalReaches = reaches.Count
+        };
+
     [Fact]
     public async Task Reads_ForUnknownAnimal_AreEmptyOrAbsent_AndCreateNoFile()
     {
-        var reaches = await _store.GetReachEventsAsync("ghost", Recent, [], [], Page);
+        var reaches = await _store.GetRawReachEventsAsync("ghost", Recent, [], [], Page);
         Assert.Empty(reaches.Items);
         Assert.Equal(0, reaches.TotalCount);
 
         Assert.Empty((await _store.GetSessionsAsync("ghost", Recent, null, Page)).Items);
-        Assert.Empty((await _store.GetTrialsAsync("ghost", SessionA, new TrialFilter(null, [], []), default, Page)).Items);
+        Assert.Empty((await _store.GetTrialsAsync("ghost", SessionA, new TrialFilter(null), default, Page)).Items);
         Assert.Empty((await _store.GetBatchesAsync("ghost", SessionA, Page)).Items);
         Assert.Null(await _store.GetSessionAsync("ghost", SessionA, default, default));
-        Assert.Null(await _store.GetTrialAsync("ghost", SessionA, 1, expandReaches: false));
+        Assert.Null(await _store.GetTrialAsync("ghost", SessionA, 1, expandRightHandReaches: false));
         Assert.Null(await _store.GetAnimalDetailAsync("ghost"));
 
         Assert.False(File.Exists(_storage.GetAnimalDatabasePath("ghost")));
     }
 
-    [Fact]
-    public async Task GetReachEvents_PagesAndFiltersByCode()
-    {
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, BatchA,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten),
-             Reach(2, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)]);
+    // The two reach codes every filtering test below pairs off against each other.
+    private static readonly List<ReachEvent> TwoReaches =
+        [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten),
+         Reach(2, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)];
 
-        var all = await _store.GetReachEventsAsync("m", Recent, [], [], Page);
+    [Fact]
+    public async Task GetRawReachEvents_PagesAndFiltersByCode()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA, Response(TwoReaches));
+
+        var all = await _store.GetRawReachEventsAsync("m", Recent, [], [], Page);
         Assert.Equal(2, all.TotalCount);
 
-        var rightHand = await _store.GetReachEventsAsync("m", Recent, [2], [], Page);   // right_hand = 2
+        var rightHand = await _store.GetRawReachEventsAsync("m", Recent, [2], [], Page);   // right_hand = 2
         var rh = Assert.Single(rightHand.Items);
         Assert.Equal(2, rh.Method);
         Assert.Equal(5, rh.Outcome);   // eaten = 5
         Assert.True(rh.TrialId > 0);   // the owning trial's key is on the wire
 
-        var missed = await _store.GetReachEventsAsync("m", Recent, [], [2], Page);       // missed = 2
+        var missed = await _store.GetRawReachEventsAsync("m", Recent, [], [2], Page);       // missed = 2
         Assert.Equal(3, Assert.Single(missed.Items).Method);   // left_hand = 3
     }
 
     [Fact]
-    public async Task CountReachEvents_MatchesFilters()
+    public async Task CountRawReachEvents_MatchesFilters()
     {
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, BatchA,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten),
-             Reach(2, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA, Response(TwoReaches));
 
-        Assert.Equal(2, await _store.CountReachEventsAsync("m", Recent, [], []));
-        Assert.Equal(1, await _store.CountReachEventsAsync("m", Recent, [2], []));            // right_hand only
-        Assert.Equal(0, await _store.CountReachEventsAsync("m", DateTime.UtcNow.AddDays(1), [], []));  // future window
-        Assert.Equal(0, await _store.CountReachEventsAsync("ghost", Recent, [], []));         // no database
+        Assert.Equal(2, await _store.CountRawReachEventsAsync("m", Recent, [], []));
+        Assert.Equal(1, await _store.CountRawReachEventsAsync("m", Recent, [2], []));            // right_hand only
+        Assert.Equal(0, await _store.CountRawReachEventsAsync("m", DateTime.UtcNow.AddDays(1), [], []));  // future window
+        Assert.Equal(0, await _store.CountRawReachEventsAsync("ghost", Recent, [], []));         // no database
+    }
+
+    [Fact]
+    public async Task GetHandReachEvents_PagesAndFiltersByCode()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA, Response([], hand: TwoReaches));
+
+        Assert.Empty((await _store.GetHandReachEventsAsync("ghost", Recent, [], [], Page)).Items);   // no database
+        Assert.Equal(2, (await _store.GetHandReachEventsAsync("m", Recent, [], [], Page)).TotalCount);
+
+        var rightHand = await _store.GetHandReachEventsAsync("m", Recent, [2], [], Page);   // right_hand = 2
+        var rh = Assert.Single(rightHand.Items);
+        Assert.Equal(2, rh.Method);
+        Assert.Equal(5, rh.Outcome);   // eaten = 5
+        Assert.True(rh.TrialId > 0);   // resolved through the result, since this table has no TrialId column
+
+        var missed = await _store.GetHandReachEventsAsync("m", Recent, [], [2], Page);      // missed = 2
+        Assert.Equal(3, Assert.Single(missed.Items).Method);   // left_hand = 3
+    }
+
+    [Fact]
+    public async Task CountHandReachEvents_MatchesFilters()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA, Response([], hand: TwoReaches));
+
+        Assert.Equal(2, await _store.CountHandReachEventsAsync("m", Recent, [], []));
+        Assert.Equal(1, await _store.CountHandReachEventsAsync("m", Recent, [2], []));
+        Assert.Equal(0, await _store.CountHandReachEventsAsync("m", DateTime.UtcNow.AddDays(1), [], []));
+        Assert.Equal(0, await _store.CountHandReachEventsAsync("ghost", Recent, [], []));
+    }
+
+    [Fact]
+    public async Task GetOtherReachEvents_PagesAndFiltersByCode()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA, Response([], other: TwoReaches));
+
+        Assert.Empty((await _store.GetOtherReachEventsAsync("ghost", Recent, [], [], Page)).Items);   // no database
+        Assert.Equal(2, (await _store.GetOtherReachEventsAsync("m", Recent, [], [], Page)).TotalCount);
+
+        var rightHand = await _store.GetOtherReachEventsAsync("m", Recent, [2], [], Page);
+        var rh = Assert.Single(rightHand.Items);
+        Assert.Equal(2, rh.Method);
+        Assert.Equal(5, rh.Outcome);
+        Assert.True(rh.TrialId > 0);
+
+        var missed = await _store.GetOtherReachEventsAsync("m", Recent, [], [2], Page);
+        Assert.Equal(3, Assert.Single(missed.Items).Method);
+    }
+
+    [Fact]
+    public async Task CountOtherReachEvents_MatchesFilters()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, BatchA, Response([], other: TwoReaches));
+
+        Assert.Equal(2, await _store.CountOtherReachEventsAsync("m", Recent, [], []));
+        Assert.Equal(1, await _store.CountOtherReachEventsAsync("m", Recent, [2], []));
+        Assert.Equal(0, await _store.CountOtherReachEventsAsync("m", DateTime.UtcNow.AddDays(1), [], []));
+        Assert.Equal(0, await _store.CountOtherReachEventsAsync("ghost", Recent, [], []));
     }
 
     [Fact]
@@ -677,9 +827,9 @@ public class AnimalDataStoreTests : IDisposable
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialEnded,
             new TrialEventValues(SessionA, 2, null, At(2)) { Result = CaptureAnalysisResult.CaptureOnly });
 
-        Assert.Equal(2, await _store.CountTrialsAsync("m", SessionA, new TrialFilter(null, [], [])));
-        Assert.Equal(1, await _store.CountTrialsAsync("m", SessionA, new TrialFilter(true, [], [])));   // analysis performed
-        Assert.Equal(0, await _store.CountTrialsAsync("m", "no-such-session", new TrialFilter(null, [], [])));
+        Assert.Equal(2, await _store.CountTrialsAsync("m", SessionA, new TrialFilter(null)));
+        Assert.Equal(1, await _store.CountTrialsAsync("m", SessionA, new TrialFilter(true)));   // analysis performed
+        Assert.Equal(0, await _store.CountTrialsAsync("m", "no-such-session", new TrialFilter(null)));
     }
 
     [Fact]
@@ -720,8 +870,9 @@ public class AnimalDataStoreTests : IDisposable
         await _store.ApplyBatchAnalysisStartedAsync("m", SessionA, BatchA, At(1), analysisTrialCount: 3);
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted,
             new TrialEventValues(SessionA, 7, BatchA, At(2)) { Reason = "r" });
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 7, BatchA,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 7, BatchA,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)],
+                hand: [Reach(2, ReachEventMethod.RightHand, ReachEventOutcome.Grabbed)]));
 
         var bare = await _store.GetSessionAsync("m", SessionA, default, default);
         Assert.NotNull(bare);
@@ -732,11 +883,11 @@ public class AnimalDataStoreTests : IDisposable
         var trial = Assert.Single(withTrials!.Trials!);
         Assert.Equal(7, trial.Identifier);
         Assert.Equal(BatchA, trial.BatchId);
-        Assert.Equal(1, trial.ReachEventCount);
-        Assert.Null(trial.Reaches);
+        Assert.Equal(1, trial.RawReachEventCount);
+        Assert.Null(trial.RightHandReaches);   // trials alone stops at the counts
 
         var withReaches = await _store.GetSessionAsync("m", SessionA, new SessionExpand(true, true, false), default);
-        Assert.Single(Assert.Single(withReaches!.Trials!).Reaches!);
+        Assert.Equal(2, Assert.Single(Assert.Single(withReaches!.Trials!).RightHandReaches!).FirstFrame);
 
         var withBatches = await _store.GetSessionAsync("m", SessionA, new SessionExpand(false, false, true), default);
         Assert.Single(withBatches!.Batches!);
@@ -745,41 +896,50 @@ public class AnimalDataStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task GetTrials_AnalysisPerformed_AndDeepReachFilter()
+    public async Task GetTrials_FiltersByAnalysisPerformed()
     {
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialEnded,
             new TrialEventValues(SessionA, 1, null, At(1)) { Result = CaptureAnalysisResult.AnalysisSucceeded });
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, null,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]));
 
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialEnded,
             new TrialEventValues(SessionA, 2, null, At(2)) { Result = CaptureAnalysisResult.CaptureOnly });
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 2, null,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Missed)]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 2, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Missed)]));
 
-        var performed = await _store.GetTrialsAsync("m", SessionA, new TrialFilter(true, [], []), default, Page);
+        var performed = await _store.GetTrialsAsync("m", SessionA, new TrialFilter(true), default, Page);
         Assert.Equal(1, Assert.Single(performed.Items).Identifier);
 
-        var notPerformed = await _store.GetTrialsAsync("m", SessionA, new TrialFilter(false, [], []), default, Page);
+        var notPerformed = await _store.GetTrialsAsync("m", SessionA, new TrialFilter(false), default, Page);
         Assert.Equal(2, Assert.Single(notPerformed.Items).Identifier);
-
-        // Deep filter: a reach with method right_hand(2) AND outcome eaten(5) — only trial 1 qualifies.
-        var deep = await _store.GetTrialsAsync("m", SessionA, new TrialFilter(null, [2], [5]), default, Page);
-        Assert.Equal(1, Assert.Single(deep.Items).Identifier);
     }
 
     [Fact]
-    public async Task GetTrials_DeepFilter_ExcludesTrialWhoseMatchingReachWasSoftDeleted()
+    public async Task TrialCounts_ExcludeSoftDeletedReaches()
     {
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted,
             new TrialEventValues(SessionA, 1, null, At(1)));
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, null,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]);
-        // Redeliver an empty list -> soft-deletes the reach.
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 1, null, []);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)],
+                hand: [Reach(2, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]));
 
-        var deep = await _store.GetTrialsAsync("m", SessionA, new TrialFilter(null, [2], [5]), default, Page);
-        Assert.Empty(deep.Items);
+        // Delete through the context, which AppDbContext turns into a soft delete. (A redelivery would not do:
+        // it hard-deletes, so the rows would be gone rather than filtered, and this would pass even if the
+        // query filter did not reach inside the count subqueries.)
+        using (var db = Db("m"))
+        {
+            db.RawReachEvents.Remove(db.RawReachEvents.Single());
+            db.HandReachEvents.Remove(db.HandReachEvents.Single());
+            db.SaveChanges();
+            Assert.NotNull(db.RawReachEvents.IgnoreQueryFilters().Single().DeletedAt);
+        }
+
+        var trial = await _store.GetTrialAsync("m", SessionA, 1, expandRightHandReaches: false);
+
+        Assert.Equal(0, trial!.RawReachEventCount);
+        Assert.Equal(0, trial.RightHandReachEventCount);
+        Assert.Equal(0, trial.HandReachEventCount);
     }
 
     [Fact]
@@ -791,7 +951,7 @@ public class AnimalDataStoreTests : IDisposable
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted, new TrialEventValues(SessionA, 1, null, At(2)));
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted, new TrialEventValues(SessionA, 2, null, At(3)));
 
-        var filter = new TrialFilter(null, [], []);
+        var filter = new TrialFilter(null);
 
         // Default (no sort): newest-started first.
         var def = await _store.GetTrialsAsync("m", SessionA, filter, default, Page);
@@ -835,22 +995,141 @@ public class AnimalDataStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task GetTrial_ExpandReaches_AndUnknownTrial()
+    public async Task GetTrial_ReturnsTheTrial_AndNullForUnknown()
     {
         await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted,
             new TrialEventValues(SessionA, 5, null, At(1)) { Reason = "hi" });
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 5, null,
-            [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 5, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]));
 
-        var noReaches = await _store.GetTrialAsync("m", SessionA, 5, expandReaches: false);
-        Assert.NotNull(noReaches);
-        Assert.Null(noReaches.Reaches);
-        Assert.Equal(1, noReaches.ReachEventCount);
+        var trial = await _store.GetTrialAsync("m", SessionA, 5, expandRightHandReaches: false);
+        Assert.NotNull(trial);
+        Assert.Equal("hi", trial.Reason);
+        Assert.Equal(1, trial.RawReachEventCount);
 
-        var withReaches = await _store.GetTrialAsync("m", SessionA, 5, expandReaches: true);
-        Assert.Single(withReaches!.Reaches!);
+        Assert.Null(await _store.GetTrialAsync("m", SessionA, 999, expandRightHandReaches: false));
+    }
 
-        Assert.Null(await _store.GetTrialAsync("m", SessionA, 999, expandReaches: false));
+    [Fact]
+    public async Task GetTrial_CarriesIntertrialResultScalars()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 5, null,
+            Response([Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)],
+                hand: [Reach(2, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)],
+                other: [Reach(3, ReachEventMethod.Tongue, ReachEventOutcome.Stalled),
+                        Reach(4, ReachEventMethod.Tongue, ReachEventOutcome.Stalled)],
+                food: 9));
+
+        // The scalars ride on the unexpanded projection too, so a trials list carries them.
+        var trial = await _store.GetTrialAsync("m", SessionA, 5, expandRightHandReaches: false);
+        Assert.Equal(9, trial!.FoodConsumed);
+        Assert.Equal(1, trial.SuccessfulReaches);
+        Assert.Equal(1, trial.TotalReaches);
+        Assert.Equal("[[1,2,3]]", trial.RhMaxVpList);
+        Assert.Equal(1, trial.RawReachEventCount);
+        Assert.Equal(1, trial.HandReachEventCount);
+        Assert.Equal(2, trial.OtherReachEventCount);
+    }
+
+    // The count that answers "how many reaches did this trial have": hand events with method right_hand, not
+    // the raw reach rows and not every hand event. All three differ here so nothing can be counting the wrong
+    // table and passing by coincidence.
+    [Fact]
+    public async Task GetTrial_RightHandReachEventCount_CountsRightHandHandEventsOnly()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 5, null,
+            Response(
+                [Reach(1, ReachEventMethod.RightHand, ReachEventOutcome.Eaten),
+                 Reach(2, ReachEventMethod.RightHand, ReachEventOutcome.Missed),
+                 Reach(3, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)],
+                hand:
+                [Reach(4, ReachEventMethod.RightHand, ReachEventOutcome.Grabbed),
+                 Reach(5, ReachEventMethod.RightHand, ReachEventOutcome.Dropped),
+                 Reach(6, ReachEventMethod.RightHand, ReachEventOutcome.Missed),
+                 Reach(7, ReachEventMethod.LeftHand, ReachEventOutcome.Missed),
+                 Reach(8, ReachEventMethod.Tongue, ReachEventOutcome.None)],
+                other: [Reach(9, ReachEventMethod.Other, ReachEventOutcome.None)]));
+
+        var trial = await _store.GetTrialAsync("m", SessionA, 5, expandRightHandReaches: false);
+
+        Assert.Equal(3, trial!.RightHandReachEventCount);   // the three right-hand hand events
+        Assert.Equal(5, trial.HandReachEventCount);         // every hand event, whatever the method
+        Assert.Equal(3, trial.RawReachEventCount);          // the analysis's own reach rows
+        Assert.Equal(1, trial.OtherReachEventCount);
+        Assert.Null(trial.RightHandReaches);                // unexpanded
+
+        // Expanded, the list is exactly the rows the count counted -- same table, same method filter.
+        var expanded = await _store.GetTrialAsync("m", SessionA, 5, expandRightHandReaches: true);
+
+        Assert.Equal([4, 5, 6], expanded!.RightHandReaches!.Select(r => r.FirstFrame));
+        Assert.All(expanded.RightHandReaches!, r => Assert.Equal(ReachEventMethod.RightHandCode, r.Method));
+        Assert.Equal(expanded.RightHandReachEventCount, expanded.RightHandReaches!.Count);
+
+        // Hand events have no TrialId column; it is resolved through the intertrial result.
+        Assert.All(expanded.RightHandReaches!, r => Assert.True(r.TrialId > 0));
+    }
+
+    // Expanded means non-null even when there is nothing to return -- null is reserved for "not expanded".
+    [Fact]
+    public async Task GetTrial_ExpandRightHandReaches_TrialWithNoResult_ReturnsEmptyListNotNull()
+    {
+        await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted,
+            new TrialEventValues(SessionA, 5, null, At(1)));
+
+        var trial = await _store.GetTrialAsync("m", SessionA, 5, expandRightHandReaches: true);
+
+        Assert.Empty(trial!.RightHandReaches!);
+    }
+
+    // The same normalisation has to hold at the session call site.
+    [Fact]
+    public async Task GetSession_ExpandTrialsRightHandReaches_TrialWithNoResult_ReturnsEmptyList()
+    {
+        await _store.ApplySessionStartedAsync("m", SessionA, At(1), isAnalysisDeferred: false);
+        await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted,
+            new TrialEventValues(SessionA, 5, null, At(1)));
+
+        var session = await _store.GetSessionAsync("m", SessionA, new SessionExpand(true, true, false), default);
+
+        Assert.Empty(Assert.Single(session!.Trials!).RightHandReaches!);
+    }
+
+    // Two trials in one session: the second round trip keys rows by trial, so a mix-up would show here.
+    [Fact]
+    public async Task GetSession_ExpandTrialsRightHandReaches_KeepsRowsWithTheirOwnTrial()
+    {
+        await _store.ApplySessionStartedAsync("m", SessionA, At(1), isAnalysisDeferred: false);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 1, null,
+            Response([], hand: [Reach(10, ReachEventMethod.RightHand, ReachEventOutcome.Eaten)]));
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 2, null,
+            Response([], hand:
+                [Reach(20, ReachEventMethod.RightHand, ReachEventOutcome.Missed),
+                 Reach(21, ReachEventMethod.LeftHand, ReachEventOutcome.Missed)]));
+
+        var session = await _store.GetSessionAsync("m", SessionA,
+            new SessionExpand(true, true, false), SortRequest.From("identifier"));
+
+        var trials = session!.Trials!;
+        Assert.Equal([10], trials[0].RightHandReaches!.Select(r => r.FirstFrame));
+        Assert.Equal([20], trials[1].RightHandReaches!.Select(r => r.FirstFrame));
+    }
+
+    [Fact]
+    public async Task GetTrial_WithNoResult_ScalarsAreNull_AndCountsZero()
+    {
+        await _store.ApplyTrialEventAsync("m", ApiEventKind.TrialStarted,
+            new TrialEventValues(SessionA, 5, null, At(1)));
+
+        var trial = await _store.GetTrialAsync("m", SessionA, 5, expandRightHandReaches: false);
+
+        Assert.Null(trial!.FoodConsumed);
+        Assert.Null(trial.SuccessfulReaches);
+        Assert.Null(trial.TotalReaches);
+        Assert.Null(trial.RhMaxVpList);
+        Assert.Equal(0, trial.RightHandReachEventCount);
+        Assert.Equal(0, trial.RawReachEventCount);
+        Assert.Equal(0, trial.HandReachEventCount);
+        Assert.Equal(0, trial.OtherReachEventCount);
     }
 
     [Fact]

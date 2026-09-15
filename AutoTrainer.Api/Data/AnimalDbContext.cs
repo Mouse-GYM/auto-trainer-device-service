@@ -10,7 +10,10 @@ public class AnimalDbContext : AppDbContext
     public DbSet<Session> Sessions => Set<Session>();
     public DbSet<Trial> Trials => Set<Trial>();
     public DbSet<BatchAnalysis> BatchAnalyses => Set<BatchAnalysis>();
-    public DbSet<ReachEvent> ReachEvents => Set<ReachEvent>();
+    public DbSet<IntertrialResult> IntertrialResults => Set<IntertrialResult>();
+    public DbSet<RawReachEvent> RawReachEvents => Set<RawReachEvent>();
+    public DbSet<HandReachEvent> HandReachEvents => Set<HandReachEvent>();
+    public DbSet<OtherReachEvent> OtherReachEvents => Set<OtherReachEvent>();
     public DbSet<ReachStatusTotal> ReachStatusTotals => Set<ReachStatusTotal>();
     public DbSet<ReachStatusDay> ReachStatusDays => Set<ReachStatusDay>();
 
@@ -45,11 +48,38 @@ public class AnimalDbContext : AppDbContext
                 .HasForeignKey(x => x.BatchAnalysisId).IsRequired(false);
         });
 
-        modelBuilder.Entity<ReachEvent>(e =>
+        modelBuilder.Entity<IntertrialResult>(e =>
         {
-            e.ToTable("ReachEvent");
-            e.HasOne(x => x.Trial).WithMany(t => t.ReachEvents)
+            e.ToTable("IntertrialResult");
+            // HasForeignKey<IntertrialResult> is what names the dependent side, and what makes TrialId unique:
+            // a trial has at most one result.
+            e.HasOne(x => x.Trial).WithOne(t => t.IntertrialResult)
+                .HasForeignKey<IntertrialResult>(x => x.TrialId).IsRequired();
+        });
+
+        // ReachEventBase is deliberately absent from this list: no DbSet and no configuration, so each of the
+        // three reach entities below gets its own table instead of one TPH table with a discriminator.
+        modelBuilder.Entity<RawReachEvent>(e =>
+        {
+            e.ToTable("RawReachEvent");
+            e.HasOne(x => x.Trial).WithMany(t => t.RawReachEvents)
                 .HasForeignKey(x => x.TrialId).IsRequired();
+            e.HasOne(x => x.IntertrialResult).WithMany(r => r.RawReachEvents)
+                .HasForeignKey(x => x.IntertrialResultId).IsRequired();
+        });
+
+        modelBuilder.Entity<HandReachEvent>(e =>
+        {
+            e.ToTable("HandReachEvent");
+            e.HasOne(x => x.IntertrialResult).WithMany(r => r.HandReachEvents)
+                .HasForeignKey(x => x.IntertrialResultId).IsRequired();
+        });
+
+        modelBuilder.Entity<OtherReachEvent>(e =>
+        {
+            e.ToTable("OtherReachEvent");
+            e.HasOne(x => x.IntertrialResult).WithMany(r => r.OtherReachEvents)
+                .HasForeignKey(x => x.IntertrialResultId).IsRequired();
         });
 
         modelBuilder.Entity<ReachStatusTotal>().ToTable("ReachStatusTotal");

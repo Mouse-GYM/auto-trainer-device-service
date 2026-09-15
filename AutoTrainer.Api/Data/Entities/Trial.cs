@@ -43,5 +43,9 @@ public class Trial : SoftDeleteEntity
     // JSON of the intertrialPelletShift payload. Deliberately not queryable; deserialize to display it.
     public string? IntertrialPelletShift { get; set; }
 
-    public ICollection<ReachEvent> ReachEvents { get; set; } = [];
+    public ICollection<RawReachEvent> RawReachEvents { get; set; } = [];
+
+    // One-to-one, so a reference and not a collection. Null until the trial is analysed -- a trial seen only
+    // through its capture-phase events has no intertrial result, and never will if analysis is skipped.
+    public IntertrialResult? IntertrialResult { get; set; }
 }

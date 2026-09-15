@@ -252,10 +252,81 @@ public class AutotrainerDeviceAnimalEventTests
     }
 
     [Fact]
-    public async Task TrialReachEvents_ReplacesByTrial()
+    public async Task IntertrialResponse_PersistsResult()
     {
         var (device, _, _, _, animalStore) = Build();
         await SelectAnimalAsync(device);
+
+        device.OnApiEvent(Event(ApiEventKind.IntertrialResponse, IntertrialResponseEvent()));
+        await DrainAsync(device);
+
+        animalStore.Verify(s => s.ReplaceIntertrialResultAsync(
+            "mouse-1", SessionA, 3, BatchA,
+            It.Is<IntertrialResponse>(r => r.ReachEvents.Count == 1 && r.HandEvents.Count == 2
+                && r.OtherEvents.Count == 3 && r.FoodConsumed == 4),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task IntertrialResponse_UpdatesLiveModelAndBroadcasts()
+    {
+        var (device, _, clients, _, _) = Build();
+        await SelectAnimalAsync(device);
+
+        IntertrialResultDto? captured = null;
+        clients.Setup(c => c.IntertrialResultChanged(It.IsAny<IntertrialResultDto>()))
+            .Callback<IntertrialResultDto>(d => captured = d)
+            .Returns(Task.CompletedTask);
+
+        device.OnApiEvent(Event(ApiEventKind.IntertrialResponse, IntertrialResponseEvent()));
+        await DrainAsync(device);
+
+        clients.Verify(c => c.IntertrialResultChanged(It.IsAny<IntertrialResultDto>()), Times.Once);
+
+        Assert.NotNull(captured);
+        Assert.Equal(SessionA, captured.SessionId);
+        Assert.Equal(3, captured.TrialId);
+        Assert.Equal(BatchA, captured.BatchId);
+        Assert.Equal(4, captured.FoodConsumed);
+        Assert.Equal(5, captured.SuccessfulReaches);
+        Assert.Equal(6, captured.TotalReaches);
+        Assert.Equal("[[1,2,3]]", captured.RhMaxVpList);
+        Assert.Single(captured.RawReachEvents);   // the payload's reach_events, under the name the service uses
+        Assert.Equal(2, captured.HandReachEvents.Count);
+        Assert.Equal(3, captured.OtherReachEvents.Count);
+
+        // The retained value and the broadcast one cannot drift apart.
+        Assert.Same(captured, device.IntertrialResult);
+    }
+
+    [Fact]
+    public async Task IntertrialResponse_WithNoResponseData_PersistsNothing()
+    {
+        var (device, _, clients, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+        animalStore.Invocations.Clear();
+
+        device.OnApiEvent(Event(ApiEventKind.IntertrialResponse, new ApiIntertrialResponsePayload
+        {
+            SessionId = SessionA,
+            TrialId = 3,
+            BatchId = BatchA,
+            ResponseData = null
+        }));
+        await DrainAsync(device);
+
+        Assert.Empty(animalStore.Invocations);
+        Assert.Null(device.IntertrialResult);
+        clients.Verify(c => c.IntertrialResultChanged(It.IsAny<IntertrialResultDto>()), Times.Never);
+    }
+
+    // 1911 is still in the type mirror because the producer still defines it, but nothing consumes it now.
+    [Fact]
+    public async Task TrialReachEvents_PersistsNothing()
+    {
+        var (device, _, _, _, animalStore) = Build();
+        await SelectAnimalAsync(device);
+        animalStore.Invocations.Clear();
 
         device.OnApiEvent(Event(ApiEventKind.TrialReachEvents, new ApiTrialReachEventsPayload
         {
@@ -266,11 +337,26 @@ public class AutotrainerDeviceAnimalEventTests
         }));
         await DrainAsync(device);
 
-        animalStore.Verify(s => s.ReplaceTrialReachEventsAsync(
-            "mouse-1", SessionA, 3, BatchA,
-            It.Is<IReadOnlyCollection<ReachEvent>>(r => r.Count == 1),
-            It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Empty(animalStore.Invocations);
     }
+
+    // Distinct list lengths and scalars so nothing can be confused for anything else.
+    private static ApiIntertrialResponsePayload IntertrialResponseEvent() => new()
+    {
+        SessionId = SessionA,
+        TrialId = 3,
+        BatchId = BatchA,
+        ResponseData = new IntertrialResponse
+        {
+            RhMaxVpList = [[1, 2, 3]],
+            ReachEvents = [new ReachEvent { Init = 1 }],
+            HandEvents = [new ReachEvent { Init = 2 }, new ReachEvent { Init = 3 }],
+            OtherEvents = [new ReachEvent { Init = 4 }, new ReachEvent { Init = 5 }, new ReachEvent { Init = 6 }],
+            FoodConsumed = 4,
+            SuccessfulReaches = 5,
+            TotalReaches = 6
+        }
+    };
 
     // Tunnel events still drive system state and reach the hub, but no longer define a session.
     [Fact]

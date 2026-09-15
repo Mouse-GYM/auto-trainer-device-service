@@ -17,9 +17,9 @@ public sealed record TrialEventValues(string SessionId, int TrialId, string? Bat
     public string? PelletShiftJson { get; init; }
 }
 
-// Trials-by-session query filters. Empty ReachMethods/ReachOutcomes means "no reach filter". AnalysisPerformed
-// is defined as: Result present and not capture_only (see GetTrialsAsync).
-public readonly record struct TrialFilter(bool? AnalysisPerformed, int[] ReachMethods, int[] ReachOutcomes);
+// Trials-by-session query filters. AnalysisPerformed is defined as: Result present and not capture_only (see
+// GetTrialsAsync).
+public readonly record struct TrialFilter(bool? AnalysisPerformed);
 
 // Sort fields the trials-by-session queries understand (both the /trials list and the session expand=trials
 // path). Only `identifier` is supported today; the shared `sort` convention (see SortRequest) and default
@@ -87,8 +87,11 @@ public interface IAnimalDataStore
     Task ApplyTrialEventAsync(string identifier, ApiEventKind kind, TrialEventValues values,
         CancellationToken ct = default);
 
-    Task ReplaceTrialReachEventsAsync(string identifier, string sessionId, int trialId, string? batchId,
-        IReadOnlyCollection<ReachEvent> reachEvents, CancellationToken ct = default);
+    // Writes the trial's whole intertrial analysis: the result row plus its three reach lists. A re-delivery
+    // for the same trial replaces the previous result outright (see the implementation for why that delete is
+    // hard rather than soft).
+    Task ReplaceIntertrialResultAsync(string identifier, string sessionId, int trialId, string? batchId,
+        IntertrialResponse responseData, CancellationToken ct = default);
 
     Task AddReachStatusIfChangedAsync(string identifier, ApiReachStatus total, ApiReachStatus day,
         DateOnly? dayValue, CancellationToken ct = default);
@@ -105,10 +108,22 @@ public interface IAnimalDataStore
     // All reads follow read-without-create: an animal with no database yet simply has no data (empty/absent),
     // and the read never migrates or creates the database.
 
-    Task<PagedResult<ReachEventDto>> GetReachEventsAsync(string identifier, DateTime since, int[] methods,
+    Task<PagedResult<ReachEventDto>> GetRawReachEventsAsync(string identifier, DateTime since, int[] methods,
         int[] outcomes, PageRequest page, CancellationToken ct = default);
 
-    Task<int> CountReachEventsAsync(string identifier, DateTime since, int[] methods, int[] outcomes,
+    Task<int> CountRawReachEventsAsync(string identifier, DateTime since, int[] methods, int[] outcomes,
+        CancellationToken ct = default);
+
+    Task<PagedResult<ReachEventDto>> GetHandReachEventsAsync(string identifier, DateTime since, int[] methods,
+        int[] outcomes, PageRequest page, CancellationToken ct = default);
+
+    Task<int> CountHandReachEventsAsync(string identifier, DateTime since, int[] methods, int[] outcomes,
+        CancellationToken ct = default);
+
+    Task<PagedResult<ReachEventDto>> GetOtherReachEventsAsync(string identifier, DateTime since, int[] methods,
+        int[] outcomes, PageRequest page, CancellationToken ct = default);
+
+    Task<int> CountOtherReachEventsAsync(string identifier, DateTime since, int[] methods, int[] outcomes,
         CancellationToken ct = default);
 
     // since is optional: null means no time window (return every session for the animal).
@@ -127,8 +142,8 @@ public interface IAnimalDataStore
     Task<int> CountTrialsAsync(string identifier, string sessionId, TrialFilter filter,
         CancellationToken ct = default);
 
-    Task<TrialDto?> GetTrialAsync(string identifier, string sessionId, int trialId, bool expandReaches,
-        CancellationToken ct = default);
+    Task<TrialDto?> GetTrialAsync(string identifier, string sessionId, int trialId,
+        bool expandRightHandReaches, CancellationToken ct = default);
 
     Task<PagedResult<BatchAnalysisDto>> GetBatchesAsync(string identifier, string sessionId, PageRequest page,
         CancellationToken ct = default);
@@ -385,10 +400,10 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
         await db.SaveChangesAsync(ct);
     }
 
-    // --- Reach events -------------------------------------------------------------------------------
+    // --- Intertrial result --------------------------------------------------------------------------
 
-    public async Task ReplaceTrialReachEventsAsync(string identifier, string sessionId, int trialId,
-        string? batchId, IReadOnlyCollection<ReachEvent> reachEvents, CancellationToken ct = default)
+    public async Task ReplaceIntertrialResultAsync(string identifier, string sessionId, int trialId,
+        string? batchId, IntertrialResponse responseData, CancellationToken ct = default)
     {
         if (!await EnsureAnimalDatabaseAsync(identifier, ct))
             return;
@@ -397,33 +412,83 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
 
         var trial = await EnsureTrialForEventAsync(db, sessionId, trialId, batchId, ct);
 
-        // trialReachEvents carries the trial's whole list, so a re-delivery replaces rather than appends.
-        // A trial we just created has no rows to replace (and no Id to query by yet).
-        if (trial.Id != 0)
-        {
-            // The query filter already excludes previously soft-deleted rows, so this does not re-delete them.
-            var existing = await db.ReachEvents.Where(r => r.TrialId == trial.Id).ToListAsync(ct);
+        // intertrialResponse carries the trial's whole analysis, so a re-delivery replaces rather than appends.
+        // A trial we just created has no result to replace (and no Id to query by yet).
+        var existingId = trial.Id == 0
+            ? null
+            : await db.IntertrialResults.IgnoreQueryFilters()
+                .Where(r => r.TrialId == trial.Id).Select(r => (int?)r.Id).FirstOrDefaultAsync(ct);
 
-            if (existing.Count > 0)
-                db.ReachEvents.RemoveRange(existing);   // AppDbContext turns Delete into a soft delete
+        // Null on the first write, so the common path keeps the implicit SaveChanges transaction it has today.
+        // On a replacement the deletes and the insert below must commit together: ExecuteDeleteAsync commits
+        // immediately, so without this an insert failure would leave the trial with NO result after its durable
+        // one had already been destroyed. ExecuteDeleteAsync joins the ambient transaction automatically.
+        await using var tx = existingId is null ? null : await db.Database.BeginTransactionAsync(ct);
+
+        if (existingId is { } id)
+        {
+            // Hard delete, not Remove(): ApplyAudit turns a Remove of an ISoftDelete entity into a DeletedAt
+            // stamp, and the unique index on TrialId counts those tombstones -- a soft-deleted result would
+            // block the insert below. IgnoreQueryFilters above is load-bearing for the same reason: the row
+            // being replaced may already be soft-deleted and therefore invisible to a filtered query.
+            //
+            // The children go explicitly rather than by the FK's cascade: it keeps the intent on the page and
+            // does not depend on SQLite having foreign keys enforced.
+            await db.RawReachEvents.IgnoreQueryFilters()
+                .Where(r => r.IntertrialResultId == id).ExecuteDeleteAsync(ct);
+            await db.HandReachEvents.IgnoreQueryFilters()
+                .Where(r => r.IntertrialResultId == id).ExecuteDeleteAsync(ct);
+            await db.OtherReachEvents.IgnoreQueryFilters()
+                .Where(r => r.IntertrialResultId == id).ExecuteDeleteAsync(ct);
+            await db.IntertrialResults.IgnoreQueryFilters()
+                .Where(r => r.Id == id).ExecuteDeleteAsync(ct);
         }
 
-        foreach (var reachEvent in reachEvents)
+        var result = new Entities.IntertrialResult
         {
-            db.ReachEvents.Add(new Entities.ReachEvent
-            {
-                Trial = trial,   // navigation, so this works for a trial that is not saved yet
-                Method = ReachEventMethod.ToCode(reachEvent.Method),
-                Outcome = ReachEventOutcome.ToCode(reachEvent.Outcome),
-                FirstFrame = reachEvent.Init,
-                LastFrame = reachEvent.End,
-                MaxFrame = reachEvent.Max,
-                DelaySincePresented = reachEvent.DelaySincePresented
-            });
+            Trial = trial,   // navigation, so this works for a trial that is not saved yet
+            RhMaxVpList = responseData.RhMaxVpList is null
+                ? null
+                : JsonSerializer.Serialize(responseData.RhMaxVpList, JsonDefaults.CamelCase),
+            FoodConsumed = responseData.FoodConsumed,
+            SuccessfulReaches = responseData.SuccessfulReaches,
+            TotalReaches = responseData.TotalReaches
+        };
+
+        db.IntertrialResults.Add(result);
+
+        foreach (var reachEvent in responseData.ReachEvents)
+        {
+            var row = ToReachRow<Entities.RawReachEvent>(reachEvent, result);
+            row.Trial = trial;   // the one child that also links straight to the trial
+            db.RawReachEvents.Add(row);
         }
+
+        foreach (var handEvent in responseData.HandEvents)
+            db.HandReachEvents.Add(ToReachRow<Entities.HandReachEvent>(handEvent, result));
+
+        foreach (var otherEvent in responseData.OtherEvents)
+            db.OtherReachEvents.Add(ToReachRow<Entities.OtherReachEvent>(otherEvent, result));
 
         await db.SaveChangesAsync(ct);
+
+        if (tx is not null)
+            await tx.CommitAsync(ct);
     }
+
+    // Parents are wired by NAVIGATION, never by id, so EF orders the inserts and the whole graph still lands in
+    // one SaveChanges even though the result has no key yet.
+    private static TReach ToReachRow<TReach>(ReachEvent source, Entities.IntertrialResult result)
+        where TReach : Entities.ReachEventBase, new() => new()
+        {
+            IntertrialResult = result,
+            Method = ReachEventMethod.ToCode(source.Method),
+            Outcome = ReachEventOutcome.ToCode(source.Outcome),
+            FirstFrame = source.Init,
+            LastFrame = source.End,
+            MaxFrame = source.Max,
+            DelaySincePresented = source.DelaySincePresented
+        };
 
     // A read must never create the database. True only when the identifier is valid AND the animal's database
     // already exists (in-process memo or on disk) — otherwise the animal simply has no data yet.
@@ -438,29 +503,69 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
         return _initialized.ContainsKey(identifier) || File.Exists(storage.GetAnimalDatabasePath(identifier));
     }
 
-    // Trial projection shared by the trials list and the single-trial/session-detail reads. Two variants so the
-    // reach children are populated only on the drill-down; the scalar columns are otherwise identical.
-    private static readonly Expression<Func<Entities.Trial, TrialDto>> ProjectTrialNoReaches = t => new TrialDto(
+    // Trial projection shared by the trials list and the single-trial/session-detail reads. One variant: the
+    // counts are the whole of it, and RightHandReaches is left null for WithRightHandReachesAsync to fill on
+    // the expand paths.
+    //
+    // The result-owned counts are scalar subqueries, which SQLite handles. The rows behind them are NOT
+    // projected here: that is a correlated collection subquery across the optional IntertrialResult reference,
+    // which EF can only express as SQL APPLY -- and SQLite has no APPLY, in either the guarded or the
+    // unguarded form. Hence the separate round trip.
+    private static readonly Expression<Func<Entities.Trial, TrialDto>> ProjectTrial = t => new TrialDto(
         t.Identifier, t.BatchAnalysis != null ? t.BatchAnalysis.Identifier : null, t.Reason, t.Result,
         t.StartedAt, t.PelletPresentedAt, t.PelletSeenAt, t.AnimalSeenAt, t.RightHandSeenAt, t.CaptureEndedAt,
         t.EndedAt, t.IntertrialSegmentationBeginAt, t.IntertrialSegmentationEndAt, t.IntertrialSegmentationError,
         t.IntertrialSegmentationSaveAt, t.IntertrialSegmentationSaveLocation, t.IntertrialSegmentationSaveError,
         t.IntertrialDetectionBeginAt, t.IntertrialDetectionEndAt, t.IntertrialDetectionError,
         t.IntertrialDetectionSaveAt, t.IntertrialDetectionSaveLocation, t.IntertrialDetectionSaveError,
-        t.IntertrialPelletShift, t.ReachEvents.Count, null);
+        t.IntertrialPelletShift,
+        t.IntertrialResult != null
+            ? t.IntertrialResult.HandReachEvents.Count(r => r.Method == ReachEventMethod.RightHandCode)
+            : 0,
+        t.RawReachEvents.Count,
+        t.IntertrialResult != null ? t.IntertrialResult.HandReachEvents.Count : 0,
+        t.IntertrialResult != null ? t.IntertrialResult.OtherReachEvents.Count : 0,
+        t.IntertrialResult != null ? (int?)t.IntertrialResult.FoodConsumed : null,
+        t.IntertrialResult != null ? (int?)t.IntertrialResult.SuccessfulReaches : null,
+        t.IntertrialResult != null ? (int?)t.IntertrialResult.TotalReaches : null,
+        t.IntertrialResult != null ? t.IntertrialResult.RhMaxVpList : null,
+        null);
 
-    private static readonly Expression<Func<Entities.Trial, TrialDto>> ProjectTrialWithReaches = t => new TrialDto(
-        t.Identifier, t.BatchAnalysis != null ? t.BatchAnalysis.Identifier : null, t.Reason, t.Result,
-        t.StartedAt, t.PelletPresentedAt, t.PelletSeenAt, t.AnimalSeenAt, t.RightHandSeenAt, t.CaptureEndedAt,
-        t.EndedAt, t.IntertrialSegmentationBeginAt, t.IntertrialSegmentationEndAt, t.IntertrialSegmentationError,
-        t.IntertrialSegmentationSaveAt, t.IntertrialSegmentationSaveLocation, t.IntertrialSegmentationSaveError,
-        t.IntertrialDetectionBeginAt, t.IntertrialDetectionEndAt, t.IntertrialDetectionError,
-        t.IntertrialDetectionSaveAt, t.IntertrialDetectionSaveLocation, t.IntertrialDetectionSaveError,
-        t.IntertrialPelletShift, t.ReachEvents.Count,
-        t.ReachEvents.OrderBy(r => r.Id).Select(r => new ReachEventDto(r.Id, r.CreatedAt, r.TrialId, r.Method,
-            r.Outcome, r.FirstFrame, r.LastFrame, r.MaxFrame, r.DelaySincePresented)).ToList());
+    // Fills RightHandReaches on an already-materialised set of trials, keyed by the trial's Identifier --
+    // unique within a session, and every caller is session-scoped. A trial with no result (or no matching
+    // rows) gets an empty list, never null: null is reserved for "not expanded".
+    private static async Task<List<TrialDto>> WithRightHandReachesAsync(AnimalDbContext db, int sessionId,
+        List<TrialDto> trials, CancellationToken ct)
+    {
+        if (trials.Count == 0)
+            return trials;
 
-    public async Task<PagedResult<ReachEventDto>> GetReachEventsAsync(string identifier, DateTime since,
+        var identifiers = trials.Select(t => t.Identifier).ToList();
+
+        var rows = await db.HandReachEvents.AsNoTracking()
+            .Where(r => r.Method == ReachEventMethod.RightHandCode
+                && r.IntertrialResult!.Trial!.SessionId == sessionId
+                && identifiers.Contains(r.IntertrialResult.Trial.Identifier))
+            .OrderBy(r => r.Id)
+            .Select(r => new
+            {
+                Identifier = r.IntertrialResult!.Trial!.Identifier,
+                // Hand events have no TrialId column of their own; it comes through the result.
+                Dto = new ReachEventDto(r.Id, r.CreatedAt, r.IntertrialResult.TrialId, r.Method, r.Outcome,
+                    r.FirstFrame, r.LastFrame, r.MaxFrame, r.DelaySincePresented)
+            })
+            .ToListAsync(ct);
+
+        var byTrial = rows.GroupBy(x => x.Identifier)
+            .ToDictionary(g => g.Key, g => (IReadOnlyList<ReachEventDto>)[.. g.Select(x => x.Dto)]);
+
+        return [.. trials.Select(t => t with
+        {
+            RightHandReaches = byTrial.GetValueOrDefault(t.Identifier, [])
+        })];
+    }
+
+    public async Task<PagedResult<ReachEventDto>> GetRawReachEventsAsync(string identifier, DateTime since,
         int[] methods, int[] outcomes, PageRequest page, CancellationToken ct = default)
     {
         if (!CanRead(identifier))
@@ -468,39 +573,105 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
 
         await using var db = factory.Create(identifier);
 
-        var q = FilteredReachEvents(db, since, methods, outcomes);
+        var q = FilteredReaches(db.RawReachEvents.AsNoTracking(), since, methods, outcomes);
 
         var total = await q.CountAsync(ct);
 
-        var items = await q
-            .OrderByDescending(r => r.CreatedAt).ThenByDescending(r => r.Id)
-            .Skip(page.Skip).Take(page.PageSize)
-            .Select(r => new ReachEventDto(r.Id, r.CreatedAt, r.TrialId, r.Method, r.Outcome,
-                r.FirstFrame, r.LastFrame, r.MaxFrame, r.DelaySincePresented))
-            .ToListAsync(ct);
+        var items = await PageReaches(q, page).Select(ProjectRawReach).ToListAsync(ct);
 
         return new PagedResult<ReachEventDto>(items, page.Page, page.PageSize, total);
     }
 
-    public async Task<int> CountReachEventsAsync(string identifier, DateTime since, int[] methods, int[] outcomes,
+    public async Task<int> CountRawReachEventsAsync(string identifier, DateTime since, int[] methods, int[] outcomes,
         CancellationToken ct = default)
     {
         if (!CanRead(identifier))
             return 0;
 
         await using var db = factory.Create(identifier);
-        return await FilteredReachEvents(db, since, methods, outcomes).CountAsync(ct);
+        return await FilteredReaches(db.RawReachEvents.AsNoTracking(), since, methods, outcomes).CountAsync(ct);
     }
 
-    // Shared filtered query behind GetReachEventsAsync/CountReachEventsAsync (the count skips ordering/paging).
-    private static IQueryable<Entities.ReachEvent> FilteredReachEvents(AnimalDbContext db, DateTime since,
-        int[] methods, int[] outcomes)
+    public async Task<PagedResult<ReachEventDto>> GetHandReachEventsAsync(string identifier, DateTime since,
+        int[] methods, int[] outcomes, PageRequest page, CancellationToken ct = default)
     {
-        var q = db.ReachEvents.AsNoTracking().Where(r => r.CreatedAt >= since);
+        if (!CanRead(identifier))
+            return PagedResult<ReachEventDto>.Empty(page.Page, page.PageSize);
+
+        await using var db = factory.Create(identifier);
+
+        var q = FilteredReaches(db.HandReachEvents.AsNoTracking(), since, methods, outcomes);
+
+        var total = await q.CountAsync(ct);
+
+        var items = await PageReaches(q, page).Select(ProjectChildReach<Entities.HandReachEvent>()).ToListAsync(ct);
+
+        return new PagedResult<ReachEventDto>(items, page.Page, page.PageSize, total);
+    }
+
+    public async Task<int> CountHandReachEventsAsync(string identifier, DateTime since, int[] methods,
+        int[] outcomes, CancellationToken ct = default)
+    {
+        if (!CanRead(identifier))
+            return 0;
+
+        await using var db = factory.Create(identifier);
+        return await FilteredReaches(db.HandReachEvents.AsNoTracking(), since, methods, outcomes).CountAsync(ct);
+    }
+
+    public async Task<PagedResult<ReachEventDto>> GetOtherReachEventsAsync(string identifier, DateTime since,
+        int[] methods, int[] outcomes, PageRequest page, CancellationToken ct = default)
+    {
+        if (!CanRead(identifier))
+            return PagedResult<ReachEventDto>.Empty(page.Page, page.PageSize);
+
+        await using var db = factory.Create(identifier);
+
+        var q = FilteredReaches(db.OtherReachEvents.AsNoTracking(), since, methods, outcomes);
+
+        var total = await q.CountAsync(ct);
+
+        var items = await PageReaches(q, page).Select(ProjectChildReach<Entities.OtherReachEvent>()).ToListAsync(ct);
+
+        return new PagedResult<ReachEventDto>(items, page.Page, page.PageSize, total);
+    }
+
+    public async Task<int> CountOtherReachEventsAsync(string identifier, DateTime since, int[] methods,
+        int[] outcomes, CancellationToken ct = default)
+    {
+        if (!CanRead(identifier))
+            return 0;
+
+        await using var db = factory.Create(identifier);
+        return await FilteredReaches(db.OtherReachEvents.AsNoTracking(), since, methods, outcomes).CountAsync(ct);
+    }
+
+    // Shared filtered query behind the three Get*/Count* reach pairs (the counts skip ordering/paging). The
+    // three columns it touches are the inherited ones, so a table that later grows one of its own is
+    // unaffected -- and one that needs a genuinely different query simply stops calling this.
+    private static IQueryable<T> FilteredReaches<T>(IQueryable<T> set, DateTime since, int[] methods,
+        int[] outcomes) where T : Entities.ReachEventBase
+    {
+        var q = set.Where(r => r.CreatedAt >= since);
         if (methods.Length > 0) q = q.Where(r => methods.Contains(r.Method));
         if (outcomes.Length > 0) q = q.Where(r => outcomes.Contains(r.Outcome));
         return q;
     }
+
+    private static IQueryable<T> PageReaches<T>(IQueryable<T> q, PageRequest page)
+        where T : Entities.ReachEventBase =>
+        q.OrderByDescending(r => r.CreatedAt).ThenByDescending(r => r.Id).Skip(page.Skip).Take(page.PageSize);
+
+    // Two projections rather than one: ReachEventDto.TrialId comes off RawReachEvent's own column, while the
+    // other two tables have no such column and reach the trial through their result -- an extra join, which is
+    // why RawReachEvent does not go through the generic one.
+    private static readonly Expression<Func<Entities.RawReachEvent, ReachEventDto>> ProjectRawReach = r =>
+        new ReachEventDto(r.Id, r.CreatedAt, r.TrialId, r.Method, r.Outcome, r.FirstFrame, r.LastFrame,
+            r.MaxFrame, r.DelaySincePresented);
+
+    private static Expression<Func<T, ReachEventDto>> ProjectChildReach<T>() where T : Entities.ReachEventBase =>
+        r => new ReachEventDto(r.Id, r.CreatedAt, r.IntertrialResult!.TrialId, r.Method, r.Outcome,
+            r.FirstFrame, r.LastFrame, r.MaxFrame, r.DelaySincePresented);
 
     public async Task<PagedResult<SessionSummaryDto>> GetSessionsAsync(string identifier, DateTime? since,
         bool? isAnalysisDeferred, PageRequest page, CancellationToken ct = default)
@@ -564,9 +735,10 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
         if (expand.Trials)
         {
             var tq = TrialSort.Apply(db.Trials.AsNoTracking().Where(t => t.SessionId == s.Id), trialSort);
-            trials = expand.TrialsReaches
-                ? await tq.Select(ProjectTrialWithReaches).ToListAsync(ct)
-                : await tq.Select(ProjectTrialNoReaches).ToListAsync(ct);
+            var rows = await tq.Select(ProjectTrial).ToListAsync(ct);
+            trials = expand.TrialsRightHandReaches
+                ? await WithRightHandReachesAsync(db, s.Id, rows, ct)
+                : rows;
         }
 
         IReadOnlyList<BatchAnalysisDto>? batches = null;
@@ -602,7 +774,7 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
 
         var items = await TrialSort.Apply(q, sort)
             .Skip(page.Skip).Take(page.PageSize)
-            .Select(ProjectTrialNoReaches)
+            .Select(ProjectTrial)
             .ToListAsync(ct);
 
         return new PagedResult<TrialDto>(items, page.Page, page.PageSize, total);
@@ -635,22 +807,11 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
                 ? q.Where(t => t.Result != null && t.Result != CaptureAnalysisResult.CaptureOnly)
                 : q.Where(t => t.Result == null || t.Result == CaptureAnalysisResult.CaptureOnly);
 
-        // Deep (graph) filter: trials that HAVE a matching reach child. EXISTS over the navigation; the
-        // soft-delete query filter is applied to ReachEvents inside .Any() too.
-        var m = filter.ReachMethods;
-        var o = filter.ReachOutcomes;
-        if (m.Length > 0 && o.Length > 0)
-            q = q.Where(t => t.ReachEvents.Any(r => m.Contains(r.Method) && o.Contains(r.Outcome)));
-        else if (m.Length > 0)
-            q = q.Where(t => t.ReachEvents.Any(r => m.Contains(r.Method)));
-        else if (o.Length > 0)
-            q = q.Where(t => t.ReachEvents.Any(r => o.Contains(r.Outcome)));
-
         return q;
     }
 
     public async Task<TrialDto?> GetTrialAsync(string identifier, string sessionId, int trialId,
-        bool expandReaches, CancellationToken ct = default)
+        bool expandRightHandReaches, CancellationToken ct = default)
     {
         if (!CanRead(identifier))
             return null;
@@ -662,11 +823,15 @@ public partial class AnimalDataStore(IAnimalDbContextFactory factory, ISqliteSto
         if (sid is null)
             return null;
 
-        var q = db.Trials.AsNoTracking().Where(t => t.SessionId == sid.Value && t.Identifier == trialId);
+        var trial = await db.Trials.AsNoTracking()
+            .Where(t => t.SessionId == sid.Value && t.Identifier == trialId)
+            .Select(ProjectTrial)
+            .FirstOrDefaultAsync(ct);
 
-        return expandReaches
-            ? await q.Select(ProjectTrialWithReaches).FirstOrDefaultAsync(ct)
-            : await q.Select(ProjectTrialNoReaches).FirstOrDefaultAsync(ct);
+        if (trial is null || !expandRightHandReaches)
+            return trial;
+
+        return (await WithRightHandReachesAsync(db, sid.Value, [trial], ct))[0];
     }
 
     public async Task<PagedResult<BatchAnalysisDto>> GetBatchesAsync(string identifier, string sessionId,

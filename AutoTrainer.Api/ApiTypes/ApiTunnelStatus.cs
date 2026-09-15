@@ -1,13 +1,9 @@
-using System.Text.Json.Serialization;
-
 namespace AutoTrainer.Api.ApiTypes;
 
 public readonly record struct ApiTunnelStatus
 {
     [JsonConverter(typeof(NullNanDoubleConverter))]
     public double MagnetIntensity { get; init; }
-
-    public bool GateOpen { get; init; }
 
     public bool IsGateOpen { get; init; }
 

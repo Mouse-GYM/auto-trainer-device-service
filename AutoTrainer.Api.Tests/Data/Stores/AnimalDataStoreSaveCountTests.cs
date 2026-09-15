@@ -39,10 +39,17 @@ public class AnimalDataStoreSaveCountTests : IDisposable
     {
         public int Count { get; private set; }
 
+        // Forces the insert half of a write to fail, so a test can prove what the failure leaves behind.
+        public bool ThrowOnSave { get; set; }
+
         public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
             DbContextEventData eventData, InterceptionResult<int> result, CancellationToken ct = default)
         {
             Count++;
+
+            if (ThrowOnSave)
+                throw new InvalidOperationException("save rejected by the test interceptor");
+
             return base.SavingChangesAsync(eventData, result, ct);
         }
 
@@ -100,22 +107,57 @@ public class AnimalDataStoreSaveCountTests : IDisposable
     }
 
     [Fact]
-    public async Task ReachEvents_CreatingSessionTrialAndBatch_SavesOnce()
+    public async Task IntertrialResult_CreatingSessionTrialAndBatch_SavesOnce()
     {
         await _store.EnsureAnimalDatabaseAsync("m");
         _factory.Counter.Reset();
 
-        await _store.ReplaceTrialReachEventsAsync("m", SessionA, 7, BatchA,
-            [new ReachEvent { Init = 1, Method = ReachEventMethod.RightHand, Outcome = ReachEventOutcome.Eaten }]);
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 7, BatchA, Response());
 
         Assert.Equal(1, _factory.Counter.Count);
 
         await using var db = _factory.Create("m");
         var trial = Assert.Single(db.Trials.ToList());
-        var reach = Assert.Single(db.ReachEvents.ToList());
+        var result = Assert.Single(db.IntertrialResults.ToList());
+        var reach = Assert.Single(db.RawReachEvents.ToList());
+        Assert.Equal(trial.Id, result.TrialId);
         Assert.Equal(trial.Id, reach.TrialId);
+        Assert.Equal(result.Id, reach.IntertrialResultId);
+        Assert.Equal(result.Id, Assert.Single(db.HandReachEvents.ToList()).IntertrialResultId);
+        Assert.Equal(result.Id, Assert.Single(db.OtherReachEvents.ToList()).IntertrialResultId);
         Assert.NotEqual(0, trial.BatchAnalysisId);
     }
+
+    [Fact]
+    public async Task IntertrialResult_ReplacementRollsBackWhenTheInsertFails()
+    {
+        await _store.ReplaceIntertrialResultAsync("m", SessionA, 7, BatchA, Response(food: 1));
+
+        // The replacement hard-deletes the durable result and its children, then inserts. Make the insert
+        // fail: without the explicit transaction around the pair, the deletes would already have committed
+        // and the trial would be left with no result at all.
+        _factory.Counter.ThrowOnSave = true;
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            _store.ReplaceIntertrialResultAsync("m", SessionA, 7, BatchA, Response(food: 2)));
+        _factory.Counter.ThrowOnSave = false;
+
+        await using var db = _factory.Create("m");
+        Assert.Equal(1, Assert.Single(db.IntertrialResults.ToList()).FoodConsumed);
+        Assert.Single(db.RawReachEvents.ToList());
+        Assert.Single(db.HandReachEvents.ToList());
+        Assert.Single(db.OtherReachEvents.ToList());
+    }
+
+    private static IntertrialResponse Response(int food = 0) => new()
+    {
+        ReachEvents = [Reach(1)],
+        HandEvents = [Reach(2)],
+        OtherEvents = [Reach(3)],
+        FoodConsumed = food
+    };
+
+    private static ReachEvent Reach(int init) =>
+        new() { Init = init, Method = ReachEventMethod.RightHand, Outcome = ReachEventOutcome.Eaten };
 
     [Fact]
     public async Task BatchAnalysisStarted_CreatingSessionAndBatch_SavesOnce()

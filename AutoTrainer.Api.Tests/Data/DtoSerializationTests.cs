@@ -6,11 +6,11 @@ using Xunit;
 
 namespace AutoTrainer.Api.Tests.Data;
 
-// The DTOs are the wire contract. They must drop EF audit columns and structurally avoid the Trial<->ReachEvent
-// cycle (a DTO has no back-navigation).
+// The DTOs are the wire contract. They must drop EF audit columns and structurally avoid the
+// Trial<->RawReachEvent cycle (a DTO has no back-navigation).
 public class DtoSerializationTests
 {
-    private static TrialDto SampleTrial(IReadOnlyList<ReachEventDto>? reaches) => new(
+    private static TrialDto SampleTrial(IReadOnlyList<ReachEventDto>? rightHandReaches = null) => new(
         Identifier: 7, BatchId: "batch-1", Reason: "r", Result: "analysis_succeeded",
         StartedAt: DateTime.UtcNow, PelletPresentedAt: null, PelletSeenAt: null, AnimalSeenAt: null,
         RightHandSeenAt: null, CaptureEndedAt: null, EndedAt: null,
@@ -19,21 +19,70 @@ public class DtoSerializationTests
         IntertrialSegmentationSaveError: null,
         IntertrialDetectionBeginAt: null, IntertrialDetectionEndAt: null, IntertrialDetectionError: null,
         IntertrialDetectionSaveAt: null, IntertrialDetectionSaveLocation: null, IntertrialDetectionSaveError: null,
-        IntertrialPelletShift: null, ReachEventCount: reaches?.Count ?? 0, Reaches: reaches);
+        IntertrialPelletShift: null, RightHandReachEventCount: 2, RawReachEventCount: 3,
+        HandReachEventCount: 4, OtherReachEventCount: 5,
+        FoodConsumed: 4, SuccessfulReaches: 5, TotalReaches: 6, RhMaxVpList: "[[1,2,3]]",
+        RightHandReaches: rightHandReaches);
 
     [Fact]
-    public void TrialDto_DropsAuditColumns_NoTrialCycle_ExposesChildren()
+    public void TrialDto_DropsAuditColumns_NoTrialCycle_ExposesTheFourCounts()
     {
-        var reach = new ReachEventDto(1, DateTime.UtcNow, 42, 2, 5, 10, 11, 10, 0.5);
-        var json = JsonSerializer.Serialize(SampleTrial([reach]), JsonDefaults.CamelCase);
+        var json = JsonSerializer.Serialize(SampleTrial(), JsonDefaults.CamelCase);
 
         Assert.DoesNotContain("createdAt", json);
         Assert.DoesNotContain("updatedAt", json);
         Assert.DoesNotContain("deletedAt", json);
-        Assert.DoesNotContain("\"trial\":", json);   // no back-navigation, so no cycle
+        Assert.DoesNotContain("\"trial\":", json);           // no back-navigation, so no cycle
+        Assert.DoesNotContain("intertrialResultId", json);   // an entity column, never on the wire
 
-        Assert.Contains("\"reaches\":", json);
+        Assert.Contains("\"rightHandReachEventCount\":2", json);
+        Assert.Contains("\"rawReachEventCount\":3", json);
+        Assert.Contains("\"handReachEventCount\":4", json);
+        Assert.Contains("\"otherReachEventCount\":5", json);
+        Assert.Contains("\"rhMaxVpList\":\"[[1,2,3]]\"", json);
         Assert.Contains("\"batchId\":", json);
+    }
+
+    // RightHandReaches is the trial's ONLY reach list; raw/hand/other rows come from the reach endpoints.
+    [Fact]
+    public void TrialDto_CarriesOnlyTheRightHandReachList()
+    {
+        var reach = new ReachEventDto(1, DateTime.UtcNow, 42, 2, 5, 10, 11, 10, 0.5);
+        var json = JsonSerializer.Serialize(SampleTrial([reach]), JsonDefaults.CamelCase);
+
+        Assert.Contains("\"rightHandReaches\":[{", json);
+        Assert.DoesNotContain("\"rawReaches\":", json);
+        Assert.DoesNotContain("\"handReaches\":", json);
+        Assert.DoesNotContain("\"otherReaches\":", json);
+    }
+
+    // Null and [] mean different things here: null is "not expanded", [] is "expanded, nothing to return".
+    [Fact]
+    public void TrialDto_Unexpanded_SerializesRightHandReachesAsNull()
+    {
+        Assert.Contains("\"rightHandReaches\":null",
+            JsonSerializer.Serialize(SampleTrial(), JsonDefaults.CamelCase));
+
+        Assert.Contains("\"rightHandReaches\":[]",
+            JsonSerializer.Serialize(SampleTrial([]), JsonDefaults.CamelCase));
+    }
+
+    [Fact]
+    public void IntertrialResultDto_CarriesTheKeysScalarsAndAllThreeLists()
+    {
+        var dto = new IntertrialResultDto("session-1", 7, "batch-1", 4, 5, 6, "[[1,2,3]]",
+            [new Api.ApiTypes.ReachEvent { Init = 1 }], [new Api.ApiTypes.ReachEvent { Init = 2 }], []);
+
+        var json = JsonSerializer.Serialize(dto, JsonDefaults.CamelCase);
+
+        Assert.Contains("\"sessionId\":\"session-1\"", json);
+        Assert.Contains("\"trialId\":7", json);
+        Assert.Contains("\"batchId\":\"batch-1\"", json);
+        Assert.Contains("\"foodConsumed\":4", json);
+        Assert.Contains("\"rhMaxVpList\":\"[[1,2,3]]\"", json);
+        Assert.Contains("\"rawReachEvents\":[{", json);
+        Assert.Contains("\"handReachEvents\":[{", json);
+        Assert.Contains("\"otherReachEvents\":[]", json);
     }
 
     // WrittenAt/EditedAt are the row's CreatedAt/UpdatedAt renamed, so the audit columns must not reach the wire

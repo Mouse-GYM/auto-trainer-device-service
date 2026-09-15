@@ -111,7 +111,7 @@ public partial class AutotrainerDevice
 
     public Behavior Behavior { get; } = new();
 
-    public List<ReachEvent> ReachEvents { get; private set; } = [];
+    public IntertrialResultDto? IntertrialResult { get; private set; }
 
     public Animal? Animal { get; private set; }
 
@@ -649,15 +649,19 @@ public partial class AutotrainerDevice
                         }
                         break;
                     }
-                case ApiEventKind.TrialReachEvents:
+                case ApiEventKind.IntertrialResponse:
                     {
-                        if (payload is ApiTrialReachEventsPayload ctx)
+                        // ResponseData is the whole event: with it absent there is nothing to record, and the
+                        // broadcast of the event itself below still happens (a bad payload never takes down an
+                        // event -- see DeserializePayload).
+                        if (payload is ApiIntertrialResponsePayload ctx && ctx.ResponseData is { } data)
                         {
-                            OnReachEventsChanged(ctx.TrialReachEvents);
+                            OnIntertrialResultChanged(ctx, data);
 
-                            // No Count > 0 guard: an empty list must still replace the trial's existing rows.
-                            await PersistToAnimalAsync(apiEvent.Kind, id => _animalStore.ReplaceTrialReachEventsAsync(
-                                id, ctx.SessionId, ctx.TrialId, ctx.BatchId, ctx.TrialReachEvents));
+                            // No Count > 0 guard: empty lists must still replace the trial's existing result.
+                            await PersistToAnimalAsync(apiEvent.Kind, id =>
+                                _animalStore.ReplaceIntertrialResultAsync(id, ctx.SessionId, ctx.TrialId,
+                                    ctx.BatchId, data));
                         }
                         break;
                     }
@@ -981,10 +985,16 @@ public partial class AutotrainerDevice
         _hubContext.Clients.All.BehaviorChanged(Behavior);
     }
 
-    private void OnReachEventsChanged(List<ReachEvent> reachEvents)
+    private void OnIntertrialResultChanged(ApiIntertrialResponsePayload ctx, IntertrialResponse data)
     {
-        ReachEvents = reachEvents;
-        _hubContext.Clients.All.ReachEventsChanged(ReachEvents);
+        // RhMaxVpList rides through as the JSON string the database stores, so the hub and a later REST read of
+        // the same trial hand back the same opaque value.
+        IntertrialResult = new IntertrialResultDto(ctx.SessionId, ctx.TrialId, ctx.BatchId, data.FoodConsumed,
+            data.SuccessfulReaches, data.TotalReaches,
+            data.RhMaxVpList is null ? null : JsonSerializer.Serialize(data.RhMaxVpList, s_JsonOptions),
+            data.ReachEvents, data.HandEvents, data.OtherEvents);
+
+        _hubContext.Clients.All.IntertrialResultChanged(IntertrialResult);
     }
 
     // Resolves the payload type from the kind (the event's only discriminator) and deserializes the context
